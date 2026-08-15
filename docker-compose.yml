@@ -1,0 +1,35 @@
+# Local development dependencies. The app itself runs on the host under pm2;
+# this file provides Postgres (and an optional DB UI) for dev.
+#   docker compose up -d
+services:
+  db:
+    image: postgres:16
+    container_name: cex_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cex}
+      POSTGRES_DB: ${POSTGRES_DB:-cex_option_reporting}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cex} -d ${POSTGRES_DB:-cex_option_reporting}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Optional lightweight DB UI at http://localhost:8080
+  adminer:
+    image: adminer:4
+    container_name: cex_adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

@@ -87,7 +87,7 @@ class OptionSummaryRow:
 
 @dataclass
 class FillRow:
-    """A single trade fill — the basis for realized PnL / the deal ledger."""
+    """A single trade fill — the basis for realized PnL on positions closed by *trading*."""
 
     trade_id: str
     inst_id: str
@@ -97,6 +97,27 @@ class FillRow:
     fee: float
     fee_ccy: str
     filled_at: datetime
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ClosedPositionRow:
+    """A closed position with realized PnL — INCLUDING options closed by expiry/delivery.
+
+    This is the source of realized PnL for expired options (which produce no trade fill).
+    `close_type` is the exchange's reason code (e.g. OKX 'type': close/liquidation/delivery).
+    """
+
+    ext_id: str                   # exchange position id (posId) — dedup key
+    inst_id: str
+    realized_pnl: float
+    pnl: float
+    close_type: str
+    open_avg_px: float
+    close_avg_px: float
+    opened_at: datetime | None
+    closed_at: datetime
+    captured_at: datetime
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -138,7 +159,15 @@ class BaseCexConnector(ABC):
     # -- history ------------------------------------------------------------ #
     @abstractmethod
     def fetch_fills(self, subacct: str, since: datetime) -> list[FillRow]:
-        """Trade fills since `since` — feeds realized PnL and the deal ledger."""
+        """Trade fills since `since` — feeds realized PnL for positions closed by trading."""
+
+    def fetch_closed_positions(self, subacct: str, since: datetime) -> list["ClosedPositionRow"]:
+        """Closed positions (incl. expiry/delivery) with realized PnL, since `since`.
+
+        Not abstract — default returns nothing so a connector can skip it, but exchanges that
+        expose expiry PnL (like OKX) should override this. Without it, expired-option PnL is lost.
+        """
+        return []
 
     # -- convenience -------------------------------------------------------- #
     def health_check(self) -> bool:

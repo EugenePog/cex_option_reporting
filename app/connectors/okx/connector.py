@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from app.connectors.base import (
     BalanceRow,
     BaseCexConnector,
+    ClosedPositionRow,
     Credentials,
     FillRow,
     MarginInfo,
@@ -62,3 +63,10 @@ class OkxConnector(BaseCexConnector):
         rows = mappers.map_fills({"data": raw})
         # Trim anything older than the requested window (last page may overshoot).
         return [r for r in rows if r.filled_at >= since]
+
+    def fetch_closed_positions(self, subacct: str, since: datetime) -> list[ClosedPositionRow]:
+        """Closed positions (incl. expiry/delivery) with realized PnL, at or after `since`."""
+        since_ms = int(since.timestamp() * 1000)
+        raw = self._client.get_positions_history_paginated(inst_type="OPTION", since_ms=since_ms)
+        rows = mappers.map_closed_positions({"data": raw})
+        return [r for r in rows if r.closed_at >= since]

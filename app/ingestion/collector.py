@@ -70,6 +70,8 @@ class Collector:
             since = self._window_start(lookback_days)
             fills = self.connector.fetch_fills(self.subacct, since)
             n += self.writer.write_fills(ingest_id, fills, self.subacct)
+            closed = self.connector.fetch_closed_positions(self.subacct, since)
+            n += self.writer.write_closed_positions(ingest_id, closed, self.subacct)
             self.writer.finish_run(ingest_id, "OK", n)
             logger.info("daily collect OK (ingest_id=%s, rows=%d, fills_since=%s)",
                         ingest_id, n, since.date())
@@ -86,6 +88,8 @@ class Collector:
             n = self._write_snapshot(ingest_id)  # snapshot the current state too
             fills = self.connector.fetch_fills(self.subacct, _EPOCH)  # full depth
             n += self.writer.write_fills(ingest_id, fills, self.subacct)
+            closed = self.connector.fetch_closed_positions(self.subacct, _EPOCH)  # expiry PnL, full depth
+            n += self.writer.write_closed_positions(ingest_id, closed, self.subacct)
             self.writer.finish_run(ingest_id, "OK", n)
             logger.info("backfill OK (ingest_id=%s, rows=%d)", ingest_id, n)
             return ingest_id

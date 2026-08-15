@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.connectors.base import BalanceRow, FillRow, MarginInfo, OptionSummaryRow, PositionRow
+from app.connectors.base import (
+    BalanceRow,
+    ClosedPositionRow,
+    FillRow,
+    MarginInfo,
+    OptionSummaryRow,
+    PositionRow,
+)
 from app.ingestion.collector import Collector
 
 
@@ -12,6 +19,7 @@ class FakeConnector:
 
     def __init__(self) -> None:
         self.fills_since: datetime | None = None
+        self.closed_since: datetime | None = None
         now = datetime(2026, 8, 12, 9, 0, tzinfo=timezone.utc)
         self._pos = [PositionRow("BTC-USD-260319-70500-C", "short", -2, 0.01, 12.5, -0.3, 0.008, now,
                                  raw={"instId": "BTC-USD-260319-70500-C"})]
@@ -30,6 +38,12 @@ class FakeConnector:
         return [FillRow("t1", "BTC-USD-260319-70500-C", "sell", 2, 0.01, -0.3, "USDT",
                         datetime(2026, 8, 12, 8, 0, tzinfo=timezone.utc), raw={"tradeId": "t1"})]
 
+    def fetch_closed_positions(self, subacct, since):
+        self.closed_since = since
+        closed = datetime(2026, 8, 12, 8, 0, tzinfo=timezone.utc)
+        return [ClosedPositionRow("p1", "BTC-USD-260319-70500-C", 5.0, 5.0, "3",
+                                  0.01, 0.0, None, closed, closed, raw={"posId": "p1"})]
+
 
 class FakeWriter:
     def __init__(self) -> None:
@@ -47,6 +61,7 @@ class FakeWriter:
     def write_margin(self, i, rows, sub=""): self.calls.append("margin"); return len(rows)
     def write_opt_summary(self, i, rows, sub=""): self.calls.append("opt_summary"); return len(rows)
     def write_fills(self, i, rows, sub=""): self.calls.append("fills"); return len(rows)
+    def write_closed_positions(self, i, rows, sub=""): self.calls.append("closed"); return len(rows)
 
     def finish_run(self, ingest_id, status, row_count, error_text=None):
         self.finished.append((ingest_id, status, row_count))
@@ -63,12 +78,13 @@ def test_daily_writes_all_layers_and_windows_fills():
     ingest_id = c.collect_daily(lookback_days=1)
 
     assert writer.runs == [(ingest_id, "daily")]
-    # snapshot + fills all written
-    assert writer.calls == ["positions", "balances", "margin", "opt_summary", "fills"]
-    # fills window starts at midnight of (today - 1 day) = 2026-08-11 00:00 UTC
+    # snapshot + fills + closed positions all written
+    assert writer.calls == ["positions", "balances", "margin", "opt_summary", "fills", "closed"]
+    # fills + closed-position windows start at midnight of (today - 1 day) = 2026-08-11 00:00 UTC
     assert conn.fills_since == datetime(2026, 8, 11, 0, 0, tzinfo=timezone.utc)
-    # run finished OK with total rows (1+1+1+1+1)
-    assert writer.finished == [(ingest_id, "OK", 5)]
+    assert conn.closed_since == datetime(2026, 8, 11, 0, 0, tzinfo=timezone.utc)
+    # run finished OK with total rows (1 each: positions, balances, margin, opt_summary, fills, closed)
+    assert writer.finished == [(ingest_id, "OK", 6)]
 
 
 def test_daily_lookback_two_days():
@@ -84,8 +100,10 @@ def test_backfill_uses_epoch_and_marks_mode():
     c.backfill()
 
     assert writer.runs[0][1] == "backfill"
-    # backfill requests fills from far in the past (full depth)
+    # backfill requests fills AND closed positions from far in the past (full depth)
     assert conn.fills_since is not None and conn.fills_since.year <= 2017
+    assert conn.closed_since is not None and conn.closed_since.year <= 2017
+    assert "closed" in writer.calls
     assert writer.finished[0][1] == "OK"
 
 

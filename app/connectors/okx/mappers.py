@@ -10,11 +10,18 @@ from typing import Any
 
 from app.connectors.base import (
     BalanceRow,
+    ClosedPositionRow,
     FillRow,
     MarginInfo,
     OptionSummaryRow,
     PositionRow,
 )
+
+
+def _ts_to_dt(ms: Any) -> datetime | None:
+    if not ms:
+        return None
+    return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc)
 
 
 def _f(val: Any, default: float = 0.0) -> float:
@@ -128,6 +135,33 @@ def map_margin(resp: dict[str, Any], captured_at: datetime) -> list[MarginInfo]:
                 mmr_usd=round(mmr_usd, 2),
                 margin_ratio=round(ratio, 4),
                 captured_at=captured_at,
+                raw=d,
+            )
+        )
+    return rows
+
+
+def map_closed_positions(resp: dict[str, Any]) -> list[ClosedPositionRow]:
+    """Map OKX positions-history rows. `cTime` = opened, `uTime` = closed; `realizedPnl` = PnL.
+
+    Includes options closed by expiry/delivery (OKX `type` = '3' delivery / '6' etc.).
+    """
+    rows: list[ClosedPositionRow] = []
+    now = datetime.now(timezone.utc)
+    for d in resp.get("data", []):
+        closed_at = _ts_to_dt(d.get("uTime")) or now
+        rows.append(
+            ClosedPositionRow(
+                ext_id=str(d.get("posId") or ""),
+                inst_id=d.get("instId", ""),
+                realized_pnl=_f(d.get("realizedPnl")),
+                pnl=_f(d.get("pnl")),
+                close_type=d.get("type", ""),
+                open_avg_px=_f(d.get("openAvgPx")),
+                close_avg_px=_f(d.get("closeAvgPx")),
+                opened_at=_ts_to_dt(d.get("cTime")),
+                closed_at=closed_at,
+                captured_at=closed_at,
                 raw=d,
             )
         )

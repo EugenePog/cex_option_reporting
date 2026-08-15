@@ -84,3 +84,18 @@ class RawTradeFill(_RawBase):
     )
 
     trade_id: Mapped[str] = mapped_column(String(64), index=True)
+
+
+class RawClosedPosition(_RawBase):
+    """Closed positions incl. expiry/delivery — the source of realized PnL on expired options.
+
+    Deduplicated on (cex_code, ext_id) [OKX posId] so daily overlaps and backfills are idempotent.
+    """
+
+    __tablename__ = "raw_closed_position"
+    __table_args__ = (
+        UniqueConstraint("cex_code", "ext_id", name="uq_raw_closed_position_cex_ext"),
+        {"schema": BRONZE},
+    )
+
+    ext_id: Mapped[str] = mapped_column(String(64), index=True)

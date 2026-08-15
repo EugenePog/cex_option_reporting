@@ -15,6 +15,7 @@ from app.db.base import session_scope
 from app.db.models import (
     IngestRun,
     RawBalance,
+    RawClosedPosition,
     RawMargin,
     RawOptSummary,
     RawPosition,
@@ -97,7 +98,32 @@ class BronzeWriter:
                     trade_id=r.trade_id,
                     captured_at=r.filled_at,
                     payload=r.raw,
-                ).on_conflict_do_nothing(constraint="uq_raw_trade_fill_cex_trade")
-                result = s.execute(stmt)
-                written += result.rowcount or 0
+                ).on_conflict_do_nothing(
+                    constraint="uq_raw_trade_fill_cex_trade"
+                ).returning(RawTradeFill.id)
+                # RETURNING yields a row only for actual inserts; skipped conflicts yield none.
+                # (rowcount is unreliable for ON CONFLICT DO NOTHING across drivers.)
+                written += len(s.execute(stmt).fetchall())
+        return written
+
+    # -- closed positions / expiry PnL (idempotent upsert) ------------------ #
+    def write_closed_positions(self, ingest_id: str, rows: list[Any], subacct: str = "") -> int:
+        """Upsert closed positions; existing (cex_code, ext_id) rows are left as-is."""
+        if not rows:
+            return 0
+        written = 0
+        with session_scope() as s:
+            for r in rows:
+                stmt = pg_insert(RawClosedPosition).values(
+                    ingest_id=ingest_id,
+                    cex_code=self.cex_code,
+                    account_label=self.account_label,
+                    subacct_name=subacct,
+                    ext_id=r.ext_id,
+                    captured_at=r.closed_at,
+                    payload=r.raw,
+                ).on_conflict_do_nothing(
+                    constraint="uq_raw_closed_position_cex_ext"
+                ).returning(RawClosedPosition.id)
+                written += len(s.execute(stmt).fetchall())
         return written

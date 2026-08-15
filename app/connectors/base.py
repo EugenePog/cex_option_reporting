@@ -101,6 +101,24 @@ class FillRow:
 
 
 @dataclass
+class BillRow:
+    """One account ledger entry (bills-archive, ~1yr). Fees, settlements, deliveries, transfers.
+
+    Supplementary money-movement detail; `pnl` carries realized PnL for settlement/delivery bills.
+    """
+
+    bill_id: str                  # dedup key
+    inst_id: str
+    bill_type: str                # OKX 'type' (e.g. 2 trade, 3 delivery, 8 funding)
+    sub_type: str                 # OKX 'subType'
+    pnl: float
+    ccy: str
+    billed_at: datetime
+    captured_at: datetime
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ClosedPositionRow:
     """A closed position with realized PnL — INCLUDING options closed by expiry/delivery.
 
@@ -167,6 +185,10 @@ class BaseCexConnector(ABC):
         Not abstract — default returns nothing so a connector can skip it, but exchanges that
         expose expiry PnL (like OKX) should override this. Without it, expired-option PnL is lost.
         """
+        return []
+
+    def fetch_bills(self, subacct: str, since: datetime) -> list["BillRow"]:
+        """Account ledger entries (fees/settlements/deliveries) since `since`. Default: none."""
         return []
 
     # -- convenience -------------------------------------------------------- #

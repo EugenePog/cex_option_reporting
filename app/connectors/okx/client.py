@@ -175,6 +175,46 @@ class OkxClient:
             after = str(cursor)
         return collected
 
+    @_retry_transient
+    def _bills_archive_page(self, inst_type: str, after: str | None, limit: int) -> dict[str, Any]:
+        """One page of the account bills archive (~1yr). `after` is a billId cursor (like fills)."""
+        import okx.Account as Account
+
+        api = Account.AccountAPI(self._k, self._s, self._p, use_server_time=False, flag=self._flag)
+        method = getattr(api, "get_account_bills_archive", None) or api.get_account_bills
+        kwargs: dict[str, Any] = {"instType": inst_type, "limit": str(limit)}
+        if after:
+            kwargs["after"] = after
+        resp = method(**kwargs)
+        _raise_on_error(resp, "get_account_bills_archive")
+        return resp
+
+    def get_bills_paginated(
+        self, inst_type: str = "OPTION", since_ms: int = 0, page_limit: int = 100,
+        max_pages: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Page the account ledger backwards until older than `since_ms` (bills use a billId cursor)."""
+        collected: list[dict[str, Any]] = []
+        after: str | None = None
+        for _ in range(max_pages):
+            try:
+                data = self._bills_archive_page(inst_type, after, page_limit).get("data", [])
+            except OkxTransientError as e:
+                logger.warning("bills pagination stopped early after transient error "
+                               "(kept %d records): %s", len(collected), e)
+                break
+            if not data:
+                break
+            collected.extend(data)
+            oldest_ts = int(data[-1].get("ts") or 0)
+            if since_ms and oldest_ts and oldest_ts < since_ms:
+                break
+            cursor = data[-1].get("billId")
+            if not cursor or len(data) < page_limit or str(cursor) == after:
+                break
+            after = str(cursor)
+        return collected
+
     # -- raw REST (not in SDK): option summary / IV+greeks ----------------- #
     @_retry_transient
     def get_opt_summary(self, uly: str, inst_id: str) -> dict[str, Any]:

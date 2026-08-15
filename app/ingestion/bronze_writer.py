@@ -15,6 +15,7 @@ from app.db.base import session_scope
 from app.db.models import (
     IngestRun,
     RawBalance,
+    RawBill,
     RawClosedPosition,
     RawMargin,
     RawOptSummary,
@@ -125,5 +126,27 @@ class BronzeWriter:
                 ).on_conflict_do_nothing(
                     constraint="uq_raw_closed_position_cex_ext"
                 ).returning(RawClosedPosition.id)
+                written += len(s.execute(stmt).fetchall())
+        return written
+
+    # -- bills / account ledger (idempotent upsert) ------------------------- #
+    def write_bills(self, ingest_id: str, rows: list[Any], subacct: str = "") -> int:
+        """Upsert ledger entries; existing (cex_code, bill_id) rows are left as-is."""
+        if not rows:
+            return 0
+        written = 0
+        with session_scope() as s:
+            for r in rows:
+                stmt = pg_insert(RawBill).values(
+                    ingest_id=ingest_id,
+                    cex_code=self.cex_code,
+                    account_label=self.account_label,
+                    subacct_name=subacct,
+                    bill_id=r.bill_id,
+                    captured_at=r.billed_at,
+                    payload=r.raw,
+                ).on_conflict_do_nothing(
+                    constraint="uq_raw_bill_cex_bill"
+                ).returning(RawBill.id)
                 written += len(s.execute(stmt).fetchall())
         return written

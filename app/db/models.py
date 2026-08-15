@@ -99,3 +99,18 @@ class RawClosedPosition(_RawBase):
     )
 
     ext_id: Mapped[str] = mapped_column(String(64), index=True)
+
+
+class RawBill(_RawBase):
+    """Account ledger (bills-archive, ~1yr): fees, settlements, deliveries, transfers.
+
+    Supplementary money-movement detail. Deduplicated on (cex_code, bill_id).
+    """
+
+    __tablename__ = "raw_bill"
+    __table_args__ = (
+        UniqueConstraint("cex_code", "bill_id", name="uq_raw_bill_cex_bill"),
+        {"schema": BRONZE},
+    )
+
+    bill_id: Mapped[str] = mapped_column(String(64), index=True)

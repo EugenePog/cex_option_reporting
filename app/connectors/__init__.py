@@ -7,6 +7,7 @@ Add a new exchange by creating one subpackage (e.g. `bybit/`) implementing the s
 from app.connectors.base import (
     BalanceRow,
     BaseCexConnector,
+    BillRow,
     ClosedPositionRow,
     Credentials,
     FillRow,
@@ -25,5 +26,6 @@ __all__ = [
     "OptionSummaryRow",
     "FillRow",
     "ClosedPositionRow",
+    "BillRow",
     "make_connector",
 ]

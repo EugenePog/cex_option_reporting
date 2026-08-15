@@ -10,6 +10,7 @@ from typing import Any
 
 from app.connectors.base import (
     BalanceRow,
+    BillRow,
     ClosedPositionRow,
     FillRow,
     MarginInfo,
@@ -135,6 +136,27 @@ def map_margin(resp: dict[str, Any], captured_at: datetime) -> list[MarginInfo]:
                 mmr_usd=round(mmr_usd, 2),
                 margin_ratio=round(ratio, 4),
                 captured_at=captured_at,
+                raw=d,
+            )
+        )
+    return rows
+
+
+def map_bills(resp: dict[str, Any]) -> list[BillRow]:
+    """Map OKX bills-archive rows. `pnl` on settlement/delivery bills carries realized PnL."""
+    rows: list[BillRow] = []
+    now = datetime.now(timezone.utc)
+    for d in resp.get("data", []):
+        rows.append(
+            BillRow(
+                bill_id=str(d.get("billId") or ""),
+                inst_id=d.get("instId", ""),
+                bill_type=d.get("type", ""),
+                sub_type=d.get("subType", ""),
+                pnl=_f(d.get("pnl")),
+                ccy=d.get("ccy", ""),
+                billed_at=_ts_to_dt(d.get("ts")) or now,
+                captured_at=_ts_to_dt(d.get("ts")) or now,
                 raw=d,
             )
         )

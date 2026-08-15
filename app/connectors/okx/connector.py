@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from app.connectors.base import (
     BalanceRow,
     BaseCexConnector,
+    BillRow,
     ClosedPositionRow,
     Credentials,
     FillRow,
@@ -70,3 +71,10 @@ class OkxConnector(BaseCexConnector):
         raw = self._client.get_positions_history_paginated(inst_type="OPTION", since_ms=since_ms)
         rows = mappers.map_closed_positions({"data": raw})
         return [r for r in rows if r.closed_at >= since]
+
+    def fetch_bills(self, subacct: str, since: datetime) -> list[BillRow]:
+        """Account ledger entries (OPTION) at or after `since`. ~1yr depth via bills-archive."""
+        since_ms = int(since.timestamp() * 1000)
+        raw = self._client.get_bills_paginated(inst_type="OPTION", since_ms=since_ms)
+        rows = mappers.map_bills({"data": raw})
+        return [r for r in rows if r.billed_at >= since]

@@ -1,4 +1,4 @@
-.PHONY: help install dev db-up db-down migrate revision init-db collect collect-loop backfill pipeline web test lint format typecheck
+.PHONY: help install dev db-up db-down migrate revision init-db seed collect collect-loop backfill pipeline web test lint format typecheck
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -20,6 +20,9 @@ revision:  ## Create a new migration: make revision m="message"
 
 init-db:  ## Create schemas + tables from ORM metadata (dev; or use `make migrate`)
 	python -m app.cli init-db
+
+seed:  ## Load core/settings CSVs from seed/ into the DB (upsert by id)
+	python -m app.cli seed
 
 collect:  ## Run ONE daily collection pass (snapshot + recent fills) into bronze
 	python -m app.cli collect

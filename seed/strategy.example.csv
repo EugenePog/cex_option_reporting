@@ -1,0 +1,3 @@
+id,subaccount_id,name,description,color
+1,1,daily-otm-strangle,Daily OTM short strangle,#4c9aff
+2,1,unassigned,Fallback bucket for unmatched positions,#888888

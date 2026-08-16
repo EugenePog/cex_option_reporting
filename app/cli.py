@@ -30,6 +30,23 @@ def init_db() -> None:
 
 
 @app.command()
+def seed(
+    folder: str = typer.Option("seed", help="Folder holding <table>.csv files."),
+    table: str = typer.Option(None, help="Load only this table."),
+    replace: bool = typer.Option(False, help="Truncate target tables before loading."),
+) -> None:
+    """Load core/settings CSVs (user, cex_account, subaccount, strategy, strategy_rule) into the DB."""
+    setup_logging()
+    from app.db.seed_loader import load_seed
+
+    counts = load_seed(folder=folder, only=table, replace=replace)
+    if not counts:
+        typer.echo("No seed CSVs found.")
+    for t, c in counts.items():
+        typer.echo(f"core.{t}: {c} rows")
+
+
+@app.command()
 def collect(loop: bool = typer.Option(False, help="Run the daily scheduler instead of one pass.")) -> None:
     """Collect a daily snapshot + recent fills into bronze (once, or on a schedule with --loop)."""
     setup_logging()
@@ -55,10 +72,18 @@ def backfill() -> None:
 
 
 @app.command()
-def pipeline(loop: bool = typer.Option(False, help="Run continuously.")) -> None:
-    """Run bronze -> silver -> gold transforms (stub)."""
+def pipeline(loop: bool = typer.Option(False, help="Run continuously on a schedule.")) -> None:
+    """Run bronze -> silver transforms (once, or on a schedule with --loop)."""
     setup_logging()
-    typer.echo(f"[pipeline] loop={loop} — TODO: wire app.pipelines.runner")
+    from app.pipelines import runner
+
+    if loop:
+        runner.run_loop()
+    else:
+        results = runner.run_once()
+        for stage, tables in results.items():
+            for table, (written, skipped) in tables.items():
+                typer.echo(f"{stage}.{table}: {written} written, {skipped} skipped")
 
 
 @app.command()

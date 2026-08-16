@@ -1,0 +1,2 @@
+id,subaccount_id,match_json,strategy_id,priority
+1,1,"{""inst_pattern"": ""BTC-USD-*""}",1,100

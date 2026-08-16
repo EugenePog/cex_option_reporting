@@ -80,29 +80,38 @@ def _fixed_now():
     return datetime(2026, 8, 12, 9, 0, tzinfo=timezone.utc)
 
 
-def test_daily_writes_all_layers_and_windows_fills():
+def test_snapshot_writes_only_point_in_time_tables():
     conn, writer = FakeConnector(), FakeWriter()
     c = Collector(conn, writer, now_fn=_fixed_now)
 
-    ingest_id = c.collect_daily(lookback_days=1)
+    ingest_id = c.collect_snapshot()
 
-    assert writer.runs == [(ingest_id, "daily")]
-    # snapshot + fills + closed positions + bills all written, in order
-    assert writer.calls == [
-        "positions", "balances", "margin", "opt_summary", "fills", "closed", "bills",
-    ]
-    # fills / closed / bills windows all start at midnight of (today - 1 day) = 2026-08-11 UTC
-    midnight = datetime(2026, 8, 11, 0, 0, tzinfo=timezone.utc)
+    assert writer.runs == [(ingest_id, "snapshot")]
+    # ONLY point-in-time data — no fills / closed / bills
+    assert writer.calls == ["positions", "balances", "margin", "opt_summary"]
+    assert conn.fills_since is None and conn.closed_since is None and conn.bills_since is None
+    assert writer.finished == [(ingest_id, "OK", 4)]
+
+
+def test_history_writes_only_history_tables_and_windows():
+    conn, writer = FakeConnector(), FakeWriter()
+    c = Collector(conn, writer, now_fn=_fixed_now)
+
+    ingest_id = c.collect_history(lookback_days=1)
+
+    assert writer.runs == [(ingest_id, "history")]
+    # ONLY history — no snapshot tables
+    assert writer.calls == ["fills", "closed", "bills"]
+    midnight = datetime(2026, 8, 11, 0, 0, tzinfo=timezone.utc)  # today - 1 day
     assert conn.fills_since == midnight
     assert conn.closed_since == midnight
     assert conn.bills_since == midnight
-    # run finished OK with total rows (1 each of the 7 sources)
-    assert writer.finished == [(ingest_id, "OK", 7)]
+    assert writer.finished == [(ingest_id, "OK", 3)]
 
 
-def test_daily_lookback_two_days():
+def test_history_lookback_two_days():
     conn, writer = FakeConnector(), FakeWriter()
-    Collector(conn, writer, now_fn=_fixed_now).collect_daily(lookback_days=2)
+    Collector(conn, writer, now_fn=_fixed_now).collect_history(lookback_days=2)
     assert conn.fills_since == datetime(2026, 8, 10, 0, 0, tzinfo=timezone.utc)
 
 
@@ -113,15 +122,17 @@ def test_backfill_uses_epoch_and_marks_mode():
     c.backfill()
 
     assert writer.runs[0][1] == "backfill"
-    # backfill requests fills, closed positions AND bills from far in the past (full depth)
+    # backfill still does snapshot + full-depth history (unchanged)
+    assert writer.calls == [
+        "positions", "balances", "margin", "opt_summary", "fills", "closed", "bills",
+    ]
     assert conn.fills_since is not None and conn.fills_since.year <= 2017
     assert conn.closed_since is not None and conn.closed_since.year <= 2017
     assert conn.bills_since is not None and conn.bills_since.year <= 2017
-    assert "closed" in writer.calls and "bills" in writer.calls
     assert writer.finished[0][1] == "OK"
 
 
-def test_daily_failure_marks_run_error():
+def test_snapshot_failure_marks_run_error():
     class Boom(FakeConnector):
         def fetch_positions(self, subacct):
             raise RuntimeError("api down")
@@ -129,7 +140,7 @@ def test_daily_failure_marks_run_error():
     writer = FakeWriter()
     c = Collector(Boom(), writer, now_fn=_fixed_now)
     try:
-        c.collect_daily()
+        c.collect_snapshot()
     except RuntimeError:
         pass
     assert writer.finished and writer.finished[0][1] == "ERROR"

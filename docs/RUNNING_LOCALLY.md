@@ -116,20 +116,24 @@ You should see `bronze.ingest_run` and `bronze.raw_balance/position/margin/opt_s
 
 ## 8. Collect data → bronze ✅
 
-Uses the OKX_K_* account. Two modes:
+Uses the OKX_K_* account. Collection is split into two schedules plus a one-off backfill:
 
 ```bash
-# Mode A — one daily pass now: current snapshot (positions/balances/margin/greeks) + recent fills
-make collect                     # == python -m app.cli collect
+# Snapshot — point-in-time balance/positions/margin/greeks. Scheduler fires at each SNAPSHOT_TIMES_UTC
+# entry (default 00:00,06:00,12:00,18:00 UTC). Runs in the foreground:
+make collect-snapshot-loop       # == python -m app.cli snapshot --loop
 
-# Mode A (scheduled) — run the daily scheduler in the foreground (fires at INGEST_HOUR_UTC, default 10:00 UTC)
-make collect-loop                # this is exactly what the pm2 "collector" process runs
+# History — fills/closed-positions/bills over a limited window (today + INGEST_DAILY_LOOKBACK_DAYS).
+# Scheduler fires once/day at INGEST_TIME_UTC (default 10:00 UTC):
+make collect-loop                # == python -m app.cli history --loop
 
-# Mode B — one-off full history backfill (pages fills back as far as OKX allows)
+# Backfill — one-off, full available history depth (also snapshots current state):
 make backfill                    # == python -m app.cli backfill
 ```
 
-Check what landed:
+For a quick manual pass without the scheduler: `python -m app.cli snapshot` or `python -m app.cli history`.
+
+Check what landed (note the `mode` column: snapshot | history | backfill):
 
 ```bash
 docker exec -it cex_pg psql -U cex -d cex_option_reporting \
@@ -138,11 +142,11 @@ docker exec -it cex_pg psql -U cex -d cex_option_reporting \
   -c "select count(*) from bronze.raw_position;"
 ```
 
-Run it as a background service with pm2 (Mode A on a schedule):
+Run as background services with pm2 (two collector processes):
 
 ```bash
-pm2 start ecosystem.config.js --only collector
-pm2 logs collector
+pm2 start ecosystem.config.js --only collector-snapshot,collector-history
+pm2 logs
 ```
 
 > pm2 tip: the ecosystem file runs `python -m app.cli ...`. Either activate the venv before

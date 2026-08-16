@@ -19,10 +19,17 @@ const common = {
 module.exports = {
   apps: [
     {
-      // Mode A: daily scheduled collector (fires at INGEST_HOUR_UTC). Long-lived.
-      name: "collector",
+      // Snapshot collector: point-in-time data, fires at each SNAPSHOT_TIMES entry. Long-lived.
+      name: "collector-snapshot",
       script: PY,
-      args: "-m app.cli collect --loop",
+      args: "-m app.cli snapshot --loop",
+      ...common,
+    },
+    {
+      // History collector: fills/closed/bills, once/day at INGEST_HOUR_UTC. Long-lived.
+      name: "collector-history",
+      script: PY,
+      args: "-m app.cli history --loop",
       ...common,
     },
     {

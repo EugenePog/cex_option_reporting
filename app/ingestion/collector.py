@@ -62,25 +62,39 @@ class Collector:
         start_date = today - timedelta(days=lookback_days)
         return datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
 
-    # -- mode A: scheduled daily ------------------------------------------- #
-    def collect_daily(self, lookback_days: int = 1) -> str:
-        ingest_id = self.writer.start_run("daily")
+    # -- mode A1: point-in-time snapshot (runs several times/day) ----------- #
+    def collect_snapshot(self) -> str:
+        """Current balance / positions / margin / greeks. No history — safe to run often."""
+        ingest_id = self.writer.start_run("snapshot")
         try:
             n = self._write_snapshot(ingest_id)
-            since = self._window_start(lookback_days)
-            fills = self.connector.fetch_fills(self.subacct, since)
-            n += self.writer.write_fills(ingest_id, fills, self.subacct)
-            closed = self.connector.fetch_closed_positions(self.subacct, since)
-            n += self.writer.write_closed_positions(ingest_id, closed, self.subacct)
-            bills = self.connector.fetch_bills(self.subacct, since)
-            n += self.writer.write_bills(ingest_id, bills, self.subacct)
             self.writer.finish_run(ingest_id, "OK", n)
-            logger.info("daily collect OK (ingest_id=%s, rows=%d, fills_since=%s)",
-                        ingest_id, n, since.date())
+            logger.info("snapshot collect OK (ingest_id=%s, rows=%d)", ingest_id, n)
             return ingest_id
         except Exception as e:  # noqa: BLE001 - record failure, never crash the loop
             self.writer.finish_run(ingest_id, "ERROR", 0, error_text=str(e))
-            logger.exception("daily collect FAILED (ingest_id=%s)", ingest_id)
+            logger.exception("snapshot collect FAILED (ingest_id=%s)", ingest_id)
+            raise
+
+    # -- mode A2: history over a limited window (once/day) ------------------ #
+    def collect_history(self, lookback_days: int = 1) -> str:
+        """Fills / closed positions / bills over today + `lookback_days` prior days."""
+        ingest_id = self.writer.start_run("history")
+        try:
+            since = self._window_start(lookback_days)
+            n = self.writer.write_fills(
+                ingest_id, self.connector.fetch_fills(self.subacct, since), self.subacct)
+            n += self.writer.write_closed_positions(
+                ingest_id, self.connector.fetch_closed_positions(self.subacct, since), self.subacct)
+            n += self.writer.write_bills(
+                ingest_id, self.connector.fetch_bills(self.subacct, since), self.subacct)
+            self.writer.finish_run(ingest_id, "OK", n)
+            logger.info("history collect OK (ingest_id=%s, rows=%d, since=%s)",
+                        ingest_id, n, since.date())
+            return ingest_id
+        except Exception as e:  # noqa: BLE001
+            self.writer.finish_run(ingest_id, "ERROR", 0, error_text=str(e))
+            logger.exception("history collect FAILED (ingest_id=%s)", ingest_id)
             raise
 
     # -- mode B: manual full backfill -------------------------------------- #

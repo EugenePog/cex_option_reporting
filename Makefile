@@ -1,4 +1,4 @@
-.PHONY: help install dev db-up db-down migrate revision init-db seed collect collect-loop backfill pipeline web test lint format typecheck
+.PHONY: help install dev db-up db-down migrate revision init-db seed collect-snapshot-loop collect-loop backfill pipeline web test lint format typecheck
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -24,11 +24,11 @@ init-db:  ## Create schemas + tables from ORM metadata (dev; or use `make migrat
 seed:  ## Load core/settings CSVs from seed/ into the DB (upsert by id)
 	python -m app.cli seed
 
-collect:  ## Run ONE daily collection pass (snapshot + recent fills) into bronze
-	python -m app.cli collect
+collect-snapshot-loop:  ## Snapshot scheduler (balance/positions/margin/greeks) — runs at SNAPSHOT_TIMES
+	python -m app.cli snapshot --loop
 
-collect-loop:  ## Run the daily scheduler (fires at INGEST_HOUR_UTC) — same as the pm2 collector
-	python -m app.cli collect --loop
+collect-loop:  ## History scheduler (fills/closed/bills) — once/day at INGEST_HOUR_UTC, limited depth
+	python -m app.cli history --loop
 
 backfill:  ## Collect the full available history depth from the exchange (one-off)
 	python -m app.cli backfill

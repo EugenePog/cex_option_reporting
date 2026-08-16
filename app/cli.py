@@ -1,10 +1,10 @@
 """Command-line entrypoints (Typer). pm2 and the Makefile call these.
 
     python -m app.cli init-db            # create tables (dev; prefer `alembic upgrade head`)
-    python -m app.cli collect            # run ONE daily collection now
-    python -m app.cli collect --loop     # run the scheduler (daily at INGEST_HOUR_UTC) — pm2 module
+    python -m app.cli snapshot [--loop]  # point-in-time data; --loop fires at SNAPSHOT_TIMES_UTC — pm2 module
+    python -m app.cli history  [--loop]  # fills/closed/bills; --loop once/day at INGEST_TIME_UTC — pm2 module
     python -m app.cli backfill           # collect full available history once (manual)
-    python -m app.cli pipeline [--loop]  # bronze -> silver -> gold  (stub)
+    python -m app.cli pipeline [--loop]  # bronze -> silver  (gold to follow)
     python -m app.cli worker  [--loop]   # alerts / reports          (stub)
 """
 from __future__ import annotations
@@ -47,18 +47,39 @@ def seed(
 
 
 @app.command()
-def collect(loop: bool = typer.Option(False, help="Run the daily scheduler instead of one pass.")) -> None:
-    """Collect a daily snapshot + recent fills into bronze (once, or on a schedule with --loop)."""
+def snapshot(loop: bool = typer.Option(False, help="Run the snapshot scheduler (SNAPSHOT_TIMES_UTC).")) -> None:
+    """Collect point-in-time data (balance/positions/margin/greeks) into bronze.
+
+    --loop runs the scheduler that fires at each SNAPSHOT_TIMES_UTC entry (several times/day).
+    """
     setup_logging()
     if loop:
-        from app.ingestion.scheduler import run_scheduler
+        from app.ingestion.scheduler import run_snapshot_scheduler
 
-        run_scheduler()
+        run_snapshot_scheduler()
     else:
         from app.ingestion.collector import make_okx_k_collector
 
-        ingest_id = make_okx_k_collector().collect_daily()
-        typer.echo(f"Daily collect complete. ingest_id={ingest_id}")
+        ingest_id = make_okx_k_collector().collect_snapshot()
+        typer.echo(f"Snapshot collect complete. ingest_id={ingest_id}")
+
+
+@app.command()
+def history(loop: bool = typer.Option(False, help="Run the daily history scheduler (INGEST_TIME_UTC).")) -> None:
+    """Collect history (fills/closed-positions/bills) over a limited window into bronze.
+
+    --loop runs the scheduler that fires once/day at INGEST_TIME_UTC.
+    """
+    setup_logging()
+    if loop:
+        from app.ingestion.scheduler import run_history_scheduler
+
+        run_history_scheduler()
+    else:
+        from app.ingestion.collector import make_okx_k_collector
+
+        ingest_id = make_okx_k_collector().collect_history()
+        typer.echo(f"History collect complete. ingest_id={ingest_id}")
 
 
 @app.command()

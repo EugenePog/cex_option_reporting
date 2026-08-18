@@ -1,4 +1,4 @@
-.PHONY: help install dev db-up db-down migrate revision init-db seed collect-snapshot-loop collect-loop backfill pipeline web test lint format typecheck
+.PHONY: help install dev db-up db-down migrate revision init-db seed collect-snapshot-loop collect-loop backfill pipeline pipeline-silver pipeline-gold web test lint format typecheck
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -33,8 +33,14 @@ collect-loop:  ## History scheduler (fills/closed/bills) — once/day at INGEST_
 backfill:  ## Collect the full available history depth from the exchange (one-off)
 	python -m app.cli backfill
 
-pipeline:  ## Run one bronze->silver->gold pass
-	python -m app.cli pipeline
+pipeline:  ## Run both transform stages (bronze->silver then silver->gold)
+	python -m app.cli pipeline --stage all
+
+pipeline-silver:  ## Run only bronze->silver
+	python -m app.cli pipeline --stage silver
+
+pipeline-gold:  ## Run only silver->gold
+	python -m app.cli pipeline --stage gold
 
 web:  ## Run the web app (dev, autoreload)
 	uvicorn app.web.main:app --reload --host 0.0.0.0 --port 8000

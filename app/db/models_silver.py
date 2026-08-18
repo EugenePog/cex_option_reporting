@@ -157,6 +157,7 @@ class ClosedPosition(Base):
     expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
     close_type: Mapped[str | None] = mapped_column(String(8), nullable=True)
     side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    size: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # closeTotalPos (contracts)
     open_avg_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     close_avg_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     realized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)

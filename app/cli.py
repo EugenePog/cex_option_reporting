@@ -4,7 +4,7 @@
     python -m app.cli snapshot [--loop]  # point-in-time data; --loop fires at SNAPSHOT_TIMES_UTC — pm2 module
     python -m app.cli history  [--loop]  # fills/closed/bills; --loop once/day at INGEST_TIME_UTC — pm2 module
     python -m app.cli backfill           # collect full available history once (manual)
-    python -m app.cli pipeline [--loop]  # bronze -> silver  (gold to follow)
+    python -m app.cli pipeline [--stage silver|gold|all] [--loop]  # transforms (default: all)
     python -m app.cli worker  [--loop]   # alerts / reports          (stub)
 """
 from __future__ import annotations
@@ -93,18 +93,33 @@ def backfill() -> None:
 
 
 @app.command()
-def pipeline(loop: bool = typer.Option(False, help="Run continuously on a schedule.")) -> None:
-    """Run bronze -> silver transforms (once, or on a schedule with --loop)."""
+def pipeline(
+    stage: str = typer.Option("all", help="Which stage to run: silver | gold | all."),
+    loop: bool = typer.Option(False, help="Run continuously on a schedule."),
+) -> None:
+    """Run transforms. bronze->silver and silver->gold can run separately via --stage.
+
+        python -m app.cli pipeline --stage silver
+        python -m app.cli pipeline --stage gold
+        python -m app.cli pipeline                 # both (silver then gold)
+    """
     setup_logging()
     from app.pipelines import runner
 
+    if stage not in ("silver", "gold", "all"):
+        raise typer.BadParameter("stage must be silver | gold | all")
+
     if loop:
-        runner.run_loop()
+        runner.run_loop(stage=stage)
     else:
-        results = runner.run_once()
-        for stage, tables in results.items():
-            for table, (written, skipped) in tables.items():
-                typer.echo(f"{stage}.{table}: {written} written, {skipped} skipped")
+        results = runner.run_stage(stage)
+        for st, tables in results.items():
+            for table, val in tables.items():
+                # silver returns (written, skipped); gold returns an int count
+                if isinstance(val, tuple):
+                    typer.echo(f"{st}.{table}: {val[0]} written, {val[1]} skipped")
+                else:
+                    typer.echo(f"{st}.{table}: {val} rows")
 
 
 @app.command()

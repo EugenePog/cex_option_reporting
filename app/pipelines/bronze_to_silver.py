@@ -232,7 +232,7 @@ def _transform_closed(session, lk: _Lookups) -> tuple[int, int]:
             "cex_code": c.cex_code, "subaccount_id": sub_id, "strategy_id": strategy_id,
             "inst_id": inst_id, "underlying": parsed.underlying, "opt_type": parsed.opt_type,
             "strike": parsed.strike, "expiry": parsed.expiry, "close_type": p.get("type"),
-            "side": side, "open_avg_px": _f(p.get("openAvgPx")),
+            "side": side, "size": _f(p.get("closeTotalPos")), "open_avg_px": _f(p.get("openAvgPx")),
             "close_avg_px": _f(p.get("closeAvgPx")), "realized_pnl": _f(p.get("realizedPnl")),
             "pnl": _f(p.get("pnl")), "fee": _f(p.get("fee")), "ccy": p.get("ccy"),
             "opened_at": opened_at, "closed_at": closed_at, "ext_id": c.ext_id,

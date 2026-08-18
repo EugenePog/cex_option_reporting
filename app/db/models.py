@@ -17,10 +17,11 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
-# Registering core + silver models here means a single `import app.db.models` pulls in every
-# table (bronze + core + silver) onto Base.metadata — used by create_all and Alembic autogenerate.
+# Registering core + silver + gold models here means a single `import app.db.models` pulls in
+# every table onto Base.metadata — used by create_all and Alembic autogenerate.
 from app.db import models_core  # noqa: E402,F401
 from app.db import models_silver  # noqa: E402,F401
+from app.db import models_gold  # noqa: E402,F401
 
 BRONZE = "bronze"
 

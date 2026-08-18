@@ -48,13 +48,23 @@ class PositionSnapshot(Base):
     size: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     avg_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     mark_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    idx_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)      # underlying index/spot (positions.idxPx)
+    fwd_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)      # forward price (opt-summary.fwdPx)
     upl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     fee: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    notional_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # positions.notionalUsd
+    opt_val: Mapped[float | None] = mapped_column(Numeric, nullable=True)       # positions.optVal
+    # Coin greeks (per-contract) from opt-summary:
     delta: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     gamma: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     theta: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     vega: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     iv: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Black-Scholes dollar greeks (position-level) from positions:
+    delta_bs: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    gamma_bs: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    theta_bs: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    vega_bs: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     ingest_id: Mapped[str] = mapped_column(String(36))
 

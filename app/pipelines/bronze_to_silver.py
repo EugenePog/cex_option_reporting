@@ -167,9 +167,14 @@ def _transform_positions(session, lk: _Lookups) -> tuple[int, int]:
             "inst_id": inst_id, "underlying": parsed.underlying, "opt_type": parsed.opt_type,
             "strike": parsed.strike, "expiry": parsed.expiry, "side": side, "size": size,
             "avg_px": _f(p.get("avgPx")), "mark_px": _f(p.get("markPx") or g.get("markPx")),
+            "idx_px": _f(p.get("idxPx")), "fwd_px": _f(g.get("fwdPx")),
             "upl": _f(p.get("upl")), "fee": _f(p.get("fee")),
+            "notional_usd": _f(p.get("notionalUsd")), "opt_val": _f(p.get("optVal")),
+            # coin greeks (opt-summary) + Black-Scholes dollar greeks (positions)
             "delta": _f(g.get("delta")), "gamma": _f(g.get("gamma")),
             "theta": _f(g.get("theta")), "vega": _f(g.get("vega")), "iv": _f(g.get("markVol")),
+            "delta_bs": _f(p.get("deltaBS")), "gamma_bs": _f(p.get("gammaBS")),
+            "theta_bs": _f(p.get("thetaBS")), "vega_bs": _f(p.get("vegaBS")),
             "captured_at": pos.captured_at, "ingest_id": pos.ingest_id,
         }, ["subaccount_id", "inst_id", "side", "captured_at"])
         written += 1

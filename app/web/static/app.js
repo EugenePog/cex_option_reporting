@@ -23,6 +23,29 @@ const usd = (v,d=0) => (v<0?"-":"") + "$" + Math.abs(v).toLocaleString(undefined
 const usdK = (v) => Math.abs(v)>=1000 ? (v<0?"-":"")+"$"+(Math.abs(v)/1000).toFixed(1)+"k" : usd(v,2);
 const pct = (v,d=1) => v==null ? "–" : v.toFixed(d)+"%";
 const signCls = (v) => v>0?"pos":(v<0?"neg":"");
+// Shared x-range across one or more arrays of ISO date/datetime strings.
+function sharedRange(...arrays) {
+  const xs = arrays.flat().filter(Boolean);
+  if (!xs.length) return null;
+  xs.sort();
+  return [xs[0], xs[xs.length - 1]];
+}
+// Link the x-axes of two stacked Plotly charts: pan/zoom one → the other follows.
+// Re-called after every newPlot (Plotly purges handlers on re-plot, so no duplicates).
+function linkX(topId, botId) {
+  const top = document.getElementById(topId), bot = document.getElementById(botId);
+  if (!top || !bot || !top.on) return;
+  let lock = false;
+  const mirror = (src, dst) => src.on("plotly_relayout", ev => {
+    if (lock) return;
+    let upd = null;
+    if (ev["xaxis.range[0]"] !== undefined) upd = {"xaxis.range": [ev["xaxis.range[0]"], ev["xaxis.range[1]"]]};
+    else if (ev["xaxis.autorange"]) upd = {"xaxis.autorange": true};
+    if (!upd) return;
+    lock = true; Plotly.relayout(dst, upd).then(() => { lock = false; });
+  });
+  mirror(top, bot); mirror(bot, top);
+}
 function fillSelect(el, items, {value,label,blank}={}) {
   el.innerHTML = "";
   if (blank) el.appendChild(new Option(blank, ""));

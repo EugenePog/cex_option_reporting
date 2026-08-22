@@ -12,7 +12,8 @@
 
 <div class="grid" style="margin-bottom:18px">
   <div class="card">
-    <h2>① Equity curve &amp; daily net P&amp;L</h2>
+    <h2>① Equity curve &amp; daily net P&amp;L
+      <label class="sync-toggle"><input type="checkbox" id="sync-1" checked> Sync timelines</label></h2>
     <p class="hint" id="equity-header">Account value over time · realized + unrealized per day.</p>
     <div id="c-equity" class="chart"></div>
     <div id="c-pnl" class="chart" style="height:200px"></div>
@@ -21,7 +22,8 @@
 
 <div class="grid" style="margin-bottom:18px">
   <div class="card">
-    <h2>①b Asset equity &amp; daily net P&amp;L (in-kind)</h2>
+    <h2>①b Asset equity &amp; daily net P&amp;L (in-kind)
+      <label class="sync-toggle"><input type="checkbox" id="sync-1b" checked> Sync timelines</label></h2>
     <p class="hint">Balance &amp; P&amp;L for a single asset, denominated in that asset.
       <select id="f-asset" style="min-width:110px;margin-left:8px"></select>
       <span id="asset-stat" style="margin-left:10px;font-weight:800"></span></p>
@@ -59,6 +61,8 @@ async function boot() {
   document.getElementById("f-subaccount").onchange = e => { state.subaccount = e.target.value; renderAll(); };
   document.getElementById("f-asset").onchange = () => renderAssetEquity();
   document.getElementById("f-expiry").onchange = () => renderPayoff();
+  document.getElementById("sync-1").onchange = () => renderEquity();
+  document.getElementById("sync-1b").onchange = () => renderAssetEquity();
   renderAll();
 }
 function renderAll(){ renderEquity(); renderAssetEquity(); renderBook(); }
@@ -73,19 +77,23 @@ async function renderAssetEquity(){
   stat.innerHTML = hx.delta!=null
     ? `<span class="${hx.delta>=0?'pos':'neg'}">${coin(hx.delta,ccy)} since ${hx.since} · ${pct(hx.pct)}</span>` : "";
   const xs = d.balance.map(p=>p.t), ys = d.balance.map(p=>p.v);
-  Plotly.newPlot("c-asset-equity", [{
+  const synced = document.getElementById("sync-1b").checked;
+  const rng = synced ? sharedRange(xs, d.pnl.map(p=>p.date)) : null;
+  const xa = rng ? {range: rng} : {};
+  await Plotly.newPlot("c-asset-equity", [{
     x:xs, y:ys, type:"scatter", mode:"lines", fill:"tozeroy",
     line:{color:COL.blue,width:2}, fillcolor:"rgba(59,130,246,0.12)",
     hovertemplate:"%{x}<br>%{y:.6f} "+ccy+"<extra></extra>"
   }], layout({ yaxis:{title:"Account balance ("+ccy+")",
       range: ys.length?[Math.min(...ys)*0.995,Math.max(...ys)*1.005]:undefined},
-    showlegend:false, margin:{l:80,r:16,t:10,b:24} }), CFG);
-  Plotly.newPlot("c-asset-pnl", [{
+    xaxis: xa, showlegend:false, margin:{l:80,r:16,t:10,b:24} }), CFG);
+  await Plotly.newPlot("c-asset-pnl", [{
     x:d.pnl.map(p=>p.date), y:d.pnl.map(p=>p.net), type:"bar",
     marker:{color:d.pnl.map(p=>p.net>=0?COL.green:COL.red)},
     hovertemplate:"%{x}<br>net %{y:.6f} "+ccy+"<extra></extra>"
-  }], layout({ yaxis:{title:"Net P&L / day ("+ccy+")"}, showlegend:false,
+  }], layout({ yaxis:{title:"Net P&L / day ("+ccy+")"}, xaxis: xa, showlegend:false,
     margin:{l:80,r:16,t:6,b:30} }), CFG);
+  if (synced) linkX("c-asset-equity", "c-asset-pnl");
 }
 function renderBook(){ renderMap(); renderGreeks(); renderLadder(); renderPayoff(true); }
 
@@ -98,16 +106,20 @@ async function renderEquity() {
       `<span class="${cls}" style="font-weight:800">${usdK(hx.delta)} since ${hx.since} · ${pct(hx.pct)}</span>`;
   }
   const xs = d.equity.map(p=>p.t), ys = d.equity.map(p=>p.v);
-  Plotly.newPlot("c-equity", [{
+  const synced = document.getElementById("sync-1").checked;
+  const rng = synced ? sharedRange(xs, d.pnl.map(p=>p.date)) : null;
+  const xa = rng ? {range: rng} : {};
+  await Plotly.newPlot("c-equity", [{
     x: xs, y: ys, type:"scatter", mode:"lines", fill:"tozeroy",
     line:{color:COL.blue,width:2}, fillcolor:"rgba(59,130,246,0.12)", name:"Equity"
   }], layout({ yaxis:{title:"Account equity (USD)", range: ys.length?[Math.min(...ys)*0.98,Math.max(...ys)*1.02]:undefined},
-    xaxis:{}, showlegend:false, margin:{l:64,r:16,t:10,b:24} }), CFG);
-  Plotly.newPlot("c-pnl", [{
+    xaxis: xa, showlegend:false, margin:{l:64,r:16,t:10,b:24} }), CFG);
+  await Plotly.newPlot("c-pnl", [{
     x: d.pnl.map(p=>p.date), y: d.pnl.map(p=>p.net), type:"bar",
     marker:{color: d.pnl.map(p=>p.net>=0?COL.green:COL.red)},
     hovertemplate:"%{x}<br>net %{y:$,.0f}<extra></extra>"
-  }], layout({ yaxis:{title:"Net P&L / day"}, showlegend:false, margin:{l:64,r:16,t:6,b:30} }), CFG);
+  }], layout({ yaxis:{title:"Net P&L / day"}, xaxis: xa, showlegend:false, margin:{l:64,r:16,t:6,b:30} }), CFG);
+  if (synced) linkX("c-equity", "c-pnl");
 }
 
 async function renderMap() {

@@ -24,6 +24,8 @@ h1.page{font-size:20px;margin:0 0 2px}
 @media(max-width:1100px){.grid.cols-2{grid-template-columns:1fr}}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
 .card h2{font-size:15px;margin:0 0 2px}
+.sync-toggle{float:right;font-weight:400;font-size:12px;color:var(--muted);cursor:pointer;user-select:none}
+.sync-toggle input{min-width:auto;width:auto;margin-right:5px;vertical-align:middle;accent-color:var(--blue)}
 .card .hint{color:var(--muted);font-size:12px;margin:0 0 10px}
 .chart{width:100%;height:360px}
 .chart.tall{height:420px}

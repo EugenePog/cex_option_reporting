@@ -152,26 +152,37 @@ pm2 logs
 > pm2 tip: the ecosystem file runs `python -m app.cli ...`. Either activate the venv before
 > `pm2 start`, or point it at the venv explicitly: `CEX_PYTHON=$(pwd)/.venv/bin/python pm2 start ecosystem.config.js`.
 
-## 9. Run pipelines bronze→silver→gold — **[needs implementation]**
+## 9. Run pipelines bronze→silver→gold ✅
 
 ```bash
-python -m app.cli pipeline       # once app/pipelines/runner.py is implemented
+make pipeline            # both stages: bronze->silver then silver->gold
+make pipeline-silver     # only bronze->silver
+make pipeline-gold       # only silver->gold
 ```
 
-## 10. Start the web app — **[needs implementation]**
-
-There is no `app/web/main.py` yet, so `make web` will fail today. Once the FastAPI app exists:
+## 10. Start the web dashboard ✅
 
 ```bash
-make web                         # uvicorn app.web.main:app --reload  →  http://localhost:8000
+# one-time: give your seeded user a login password (seed created the user without one)
+python -m app.cli set-password you@example.com     # prompts for password
+
+make web                 # uvicorn app.web.main:app --reload  →  http://localhost:8000
 ```
+
+Open http://localhost:8000, sign in, and you'll see the **Dashboard** (reports ①–⑤: equity &
+daily P&L, strike×expiry map, greeks term structure, payoff, maturity ladder) and the **Analyze**
+tab (report ⑥: filter-driven KPIs, strategy table, symbol bars, deal drill-down). A `client` user
+sees only their own subaccounts; an `admin` sees all.
+
+> The dashboard reads the **gold** tables, so run `make pipeline` first (and keep the collectors
+> running) so there's data to show.
 
 ---
 
-## Running everything as services (pm2) — after the above are implemented
+## Running everything as services (pm2)
 
 ```bash
-pm2 start ecosystem.config.js    # collector + pipeline + web (+ worker)
+pm2 start ecosystem.config.js    # collector-snapshot + collector-history + pipeline + web (+ worker)
 pm2 status
 pm2 logs
 pm2 stop all

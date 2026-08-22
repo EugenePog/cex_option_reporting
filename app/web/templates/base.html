@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}CEX Option Reporting{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+<!-- jsDelivr serves any real npm version reliably; cdnjs fallback if it's blocked. -->
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
+  onerror="this.onerror=null;document.write('<scr'+'ipt src=\'https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.2/plotly.min.js\'></scr'+'ipt>')"></script>
+<script src="/static/app.js"></script>
+</head><body>
+<div id="jserr" style="display:none;background:#2a1113;border-bottom:1px solid #5b1e22;color:#f7a6a6;padding:8px 22px;font-size:13px"></div>
+<script>
+function _showJsErr(msg){
+  const b = document.getElementById("jserr");
+  if (b) { b.style.display = "block"; b.textContent = "⚠ " + msg +
+    (typeof Plotly === "undefined" ? "  (charting library failed to load — check network/ad-blocker)" : ""); }
+}
+window.addEventListener("error", e => _showJsErr(e.message || e));
+window.addEventListener("unhandledrejection", e => _showJsErr((e.reason && e.reason.message) || e.reason || "error"));
+</script>
+  <div class="topbar">
+    <span class="brand">CEX Option Reporting</span>
+    <nav>
+      <a href="/" class="{% block nav_dash %}{% endblock %}">Dashboard</a>
+      <a href="/analyze" class="{% block nav_analyze %}{% endblock %}">Analyze</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="who">{{ user.display_name or user.email }}{% if user.is_admin %}<span class="badge">ADMIN</span>{% endif %}</span>
+    <a href="/logout" style="margin-left:16px" class="muted">Sign out</a>
+  </div>
+  <div class="wrap">{% block body %}{% endblock %}</div>
+</body></html>

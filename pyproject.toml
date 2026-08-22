@@ -32,10 +32,10 @@ dependencies = [
     # Web / auth
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
-    "fastapi-users[sqlalchemy]>=13.0",
     "jinja2>=3.1",
     "python-multipart>=0.0.9", # form posts
-    "itsdangerous>=2.2",       # session cookies
+    "itsdangerous>=2.2",       # session cookies (Starlette SessionMiddleware)
+    "bcrypt>=4.0",             # password hashing (used directly; passlib is unmaintained)
 ]
 
 [project.optional-dependencies]

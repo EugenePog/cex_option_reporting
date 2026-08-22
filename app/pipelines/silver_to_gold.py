@@ -20,6 +20,8 @@ from sqlalchemy import func, select, text
 from app.db.base import session_scope
 from app.db.models_core import CexAccount, Subaccount
 from app.db.models_gold import (
+    AssetBalanceTimeseries,
+    AssetPnlDaily,
     BalanceTimeseries,
     ClientPerformance,
     ClientPnlDaily,
@@ -41,7 +43,8 @@ from app.domain.metrics import deal_metrics, equity_metrics
 logger = logging.getLogger(__name__)
 
 _GOLD_TABLES = [  # truncated in this order at the start of each rebuild
-    "balance_timeseries", "pnl_daily", "strategy_summary", "deal_ledger", "position_current",
+    "balance_timeseries", "asset_balance_timeseries", "pnl_daily", "asset_pnl_daily",
+    "strategy_summary", "deal_ledger", "position_current",
     "greeks_by_expiry", "client_pnl_daily", "client_performance", "strategy_performance",
     "symbol_performance",
 ]
@@ -82,6 +85,8 @@ def run() -> dict[str, int]:
                        + " RESTART IDENTITY"))
 
         counts["balance_timeseries"] = _build_balance_ts(s)
+        counts["asset_balance_timeseries"] = _build_asset_balance_ts(s)
+        counts["asset_pnl_daily"] = _build_asset_pnl_daily(s)
         eod = _eod_equity(s)  # end-of-day USD equity per (subaccount, day) — used by rollups
         counts["position_current"] = _build_position_current(s)
         counts["greeks_by_expiry"] = _build_greeks_by_expiry(s)
@@ -120,6 +125,51 @@ def _build_balance_ts(s) -> int:
     for sub_id, cap, eq in agg:
         s.add(BalanceTimeseries(subaccount_id=sub_id, captured_at=cap, equity_usd=eq))
     return len(agg)
+
+
+def _build_asset_balance_ts(s) -> int:
+    # per-asset (coin) balance timeseries straight from silver.balance_snapshot
+    rows = s.execute(select(BalanceSnapshot)).scalars().all()
+    for b in rows:
+        s.add(AssetBalanceTimeseries(
+            subaccount_id=b.subaccount_id, ccy=b.ccy, captured_at=b.captured_at,
+            amount=b.total, usd_value=b.usd_value))
+    return len(rows)
+
+
+def _asset_of(underlying: str | None) -> str | None:
+    """Settlement asset of an option = base of the underlying (BTC-USD -> BTC)."""
+    return underlying.split("-")[0] if underlying else None
+
+
+def _build_asset_pnl_daily(s) -> int:
+    # realized + fees per (subaccount, ccy, day) from closed positions (coin-denominated)
+    agg: dict[tuple, dict] = defaultdict(lambda: dict(real=0.0, fee=0.0))
+    for cp in s.execute(select(ClosedPosition)).scalars():
+        if not cp.closed_at or not cp.ccy:
+            continue
+        k = (cp.subaccount_id, cp.ccy, cp.closed_at.date())
+        agg[k]["real"] += _fl(cp.realized_pnl)
+        agg[k]["fee"] += _fl(cp.fee)
+
+    # end-of-day unrealized (coin) per (subaccount, asset, day) from position snapshots
+    eod: dict[tuple, dict[datetime, float]] = defaultdict(dict)
+    for p in s.execute(select(PositionSnapshot)).scalars():
+        ccy = _asset_of(p.underlying)
+        if p.captured_at is None or ccy is None:
+            continue
+        k = (p.subaccount_id, ccy, p.captured_at.date())
+        eod[k][p.captured_at] = eod[k].get(p.captured_at, 0.0) + _fl(p.upl)
+    eod_level = {k: v[max(v)] for k, v in eod.items()}
+
+    keys = set(agg) | set(eod_level)
+    for (sub_id, ccy, d) in keys:
+        a = agg.get((sub_id, ccy, d), {})
+        realized, fees = a.get("real", 0.0), a.get("fee", 0.0)
+        s.add(AssetPnlDaily(
+            subaccount_id=sub_id, ccy=ccy, date=d, realized_pnl=realized,
+            unrealized_pnl=eod_level.get((sub_id, ccy, d)), fees=fees, net_pnl=realized - fees))
+    return len(keys)
 
 
 def _build_position_current(s) -> int:

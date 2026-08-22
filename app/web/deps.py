@@ -1,56 +1,67 @@
-"""Shared FastAPI dependencies: current user, admin gate, and DB session with RLS binding.
+"""Request dependencies: current user, admin gate, and subaccount scoping.
 
-These are stubs wiring the access-control model from ARCHITECTURE.md §5.5 / §6. The auth layer
-(fastapi-users) will populate `CurrentUser`; here we only define the contract the routes rely on.
+Auth uses a signed session cookie (Starlette SessionMiddleware). A client sees only the subaccounts
+belonging to their own cex_accounts; an admin sees every subaccount.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-# from fastapi import Depends, HTTPException, status
-# from sqlalchemy import text
+from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy import select
+
+from app.db.base import SessionLocal
+from app.db.models_core import CexAccount, CoreUser, Subaccount
 
 
 @dataclass
 class CurrentUser:
     id: int
     email: str
-    role: str  # "client" | "admin"
+    role: str                       # "client" | "admin"
+    display_name: str | None = None
+    subaccount_ids: list[int] = field(default_factory=list)
 
     @property
     def is_admin(self) -> bool:
         return self.role == "admin"
 
 
-def get_current_user() -> CurrentUser:
-    """Resolve the authenticated user from the session/JWT (wired via fastapi-users).
+def _load_user(uid: int) -> CurrentUser | None:
+    with SessionLocal() as s:
+        u = s.get(CoreUser, uid)
+        if u is None or not u.is_active:
+            return None
+        if u.role == "admin":
+            sub_ids = list(s.execute(select(Subaccount.id)).scalars())
+        else:
+            sub_ids = list(s.execute(
+                select(Subaccount.id)
+                .join(CexAccount, CexAccount.id == Subaccount.cex_account_id)
+                .where(CexAccount.user_id == u.id)
+            ).scalars())
+        return CurrentUser(id=u.id, email=u.email, role=u.role,
+                           display_name=u.display_name, subaccount_ids=sub_ids)
 
-    TODO: replace stub with real token decoding.
-    """
-    raise NotImplementedError("wire fastapi-users auth")
 
-
-def require_admin(user: CurrentUser) -> CurrentUser:
-    """Route gate for /admin/*. Rejects non-admins with 403.
-
-    Usage (once auth is wired):
-        @router.get("/admin/overview")
-        def overview(user: CurrentUser = Depends(require_admin)): ...
-    """
-    if not user.is_admin:
-        # raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
-        raise PermissionError("Admin only")
+def get_current_user(request: Request) -> CurrentUser:
+    """Resolve the logged-in user from the session, or 401 (redirect handled by the page layer)."""
+    uid = request.session.get("uid")
+    if uid is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    user = _load_user(uid)
+    if user is None:
+        request.session.clear()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     return user
 
 
-def bind_rls(session, user: CurrentUser) -> None:
-    """Set per-request Postgres session GUCs the RLS policies read (see ARCHITECTURE.md §6).
+def get_optional_user(request: Request) -> CurrentUser | None:
+    uid = request.session.get("uid")
+    return _load_user(uid) if uid is not None else None
 
-    Admins get app.is_admin='true' → policies allow cross-tenant SELECT; everyone is still
-    constrained to their own subaccounts otherwise.
-    """
-    # session.execute(text("SELECT set_config('app.current_user_id', :uid, true)"),
-    #                 {"uid": str(user.id)})
-    # session.execute(text("SELECT set_config('app.is_admin', :adm, true)"),
-    #                 {"adm": "true" if user.is_admin else "false"})
-    ...
+
+def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
+    return user

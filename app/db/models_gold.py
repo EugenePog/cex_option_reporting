@@ -52,6 +52,38 @@ class BalanceTimeseries(Base):
     equity_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
 
+class AssetBalanceTimeseries(Base):
+    """Grain: (subaccount_id, ccy, captured_at). Per-asset balance in coin + its USD value.
+
+    Powers the in-kind equity chart (e.g. BTC balance over time, denominated in BTC).
+    """
+
+    __tablename__ = "asset_balance_timeseries"
+    __table_args__ = (UniqueConstraint("subaccount_id", "ccy", "captured_at",
+                                       name="uq_gold_asset_balance_ts"), {"schema": GOLD})
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    subaccount_id: Mapped[int] = _sub_fk()
+    ccy: Mapped[str] = mapped_column(String(16), index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    amount: Mapped[float | None] = mapped_column(Numeric, nullable=True)      # coin balance
+    usd_value: Mapped[float | None] = mapped_column(Numeric, nullable=True)   # reference
+
+
+class AssetPnlDaily(Base):
+    """Grain: (subaccount_id, ccy, date). Daily P&L denominated in the asset (coin), not USD."""
+
+    __tablename__ = "asset_pnl_daily"
+    __table_args__ = ({"schema": GOLD},)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    subaccount_id: Mapped[int] = _sub_fk()
+    ccy: Mapped[str] = mapped_column(String(16), index=True)
+    date: Mapped[date] = mapped_column(Date, index=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    unrealized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    fees: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    net_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+
 class PnlDaily(Base):
     """Grain: (subaccount_id, strategy_id, date). realized net of fees; unrealized = EOD level."""
 

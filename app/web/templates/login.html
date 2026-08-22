@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · CEX Option Reporting</title>
+<link rel="stylesheet" href="/static/app.css">
+</head><body>
+  <div class="login">
+    <h1>CEX Option Reporting</h1>
+    <p>Sign in to your dashboard</p>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+    <form method="post" action="/login">
+      <div class="fld"><label>Email</label><input type="email" name="email" autocomplete="username" required autofocus></div>
+      <div class="fld"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div>
+      <button class="btn" type="submit">Sign in</button>
+    </form>
+  </div>
+</body></html>

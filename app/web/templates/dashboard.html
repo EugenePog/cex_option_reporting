@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · CEX Option Reporting{% endblock %}
+{% block nav_dash %}active{% endblock %}
+{% block body %}
+<h1 class="page">Dashboard</h1>
+<p class="sub">Open book &amp; performance across strikes and maturities.</p>
+
+<div class="filters">
+  <div class="fld"><label>Underlying</label><select id="f-underlying"></select></div>
+  <div class="fld"><label>Account</label><select id="f-subaccount"></select></div>
+</div>
+
+<div class="grid" style="margin-bottom:18px">
+  <div class="card">
+    <h2>① Equity curve &amp; daily net P&amp;L</h2>
+    <p class="hint" id="equity-header">Account value over time · realized + unrealized per day.</p>
+    <div id="c-equity" class="chart"></div>
+    <div id="c-pnl" class="chart" style="height:200px"></div>
+  </div>
+</div>
+
+<div class="grid" style="margin-bottom:18px">
+  <div class="card">
+    <h2>①b Asset equity &amp; daily net P&amp;L (in-kind)</h2>
+    <p class="hint">Balance &amp; P&amp;L for a single asset, denominated in that asset.
+      <select id="f-asset" style="min-width:110px;margin-left:8px"></select>
+      <span id="asset-stat" style="margin-left:10px;font-weight:800"></span></p>
+    <div id="c-asset-equity" class="chart"></div>
+    <div id="c-asset-pnl" class="chart" style="height:200px"></div>
+  </div>
+</div>
+
+<div class="grid cols-2">
+  <div class="card"><h2>② Strike × expiry position map</h2>
+    <p class="hint">Net contracts — blue long / red short. Dashed line = spot.</p>
+    <div id="c-map" class="chart tall"></div></div>
+  <div class="card"><h2>③ Greeks term structure</h2>
+    <p class="hint">Net vega ($/vol pt) and net theta ($/day) by expiry.</p>
+    <div id="c-greeks" class="chart tall"></div></div>
+  <div class="card"><h2>④ Payoff / risk profile</h2>
+    <p class="hint">Combined P&amp;L vs price — at expiry &amp; today (T+0).
+      <select id="f-expiry" style="min-width:120px;margin-left:8px"></select></p>
+    <div id="c-payoff" class="chart tall"></div></div>
+  <div class="card"><h2>⑤ Maturity ladder</h2>
+    <p class="hint">Premium at risk by expiry — calls vs puts.</p>
+    <div id="c-ladder" class="chart tall"></div></div>
+</div>
+
+<script>
+const state = { underlying: "", subaccount: "" };
+
+async function boot() {
+  const f = await api("/filters"); if (!f) return;
+  fillSelect(document.getElementById("f-underlying"), f.underlyings, { blank: "All" });
+  fillSelect(document.getElementById("f-subaccount"),
+             f.subaccounts.map(id => ({id, name:"Account "+id})), {value:"id",label:"name",blank:"All"});
+  fillSelect(document.getElementById("f-asset"), f.assets || []);
+  document.getElementById("f-underlying").onchange = e => { state.underlying = e.target.value; renderBook(); };
+  document.getElementById("f-subaccount").onchange = e => { state.subaccount = e.target.value; renderAll(); };
+  document.getElementById("f-asset").onchange = () => renderAssetEquity();
+  document.getElementById("f-expiry").onchange = () => renderPayoff();
+  renderAll();
+}
+function renderAll(){ renderEquity(); renderAssetEquity(); renderBook(); }
+
+const coin = (v,ccy) => (v<0?"-":"") + Math.abs(v).toLocaleString(undefined,{maximumFractionDigits:6}) + " " + (ccy||"");
+async function renderAssetEquity(){
+  const sel = document.getElementById("f-asset");
+  const d = await api("/asset-equity", { ccy: sel.value, subaccount: state.subaccount }); if(!d) return;
+  if (d.ccy && !sel.value) sel.value = d.ccy;
+  const ccy = d.ccy || "";
+  const hx = d.header || {}, stat = document.getElementById("asset-stat");
+  stat.innerHTML = hx.delta!=null
+    ? `<span class="${hx.delta>=0?'pos':'neg'}">${coin(hx.delta,ccy)} since ${hx.since} · ${pct(hx.pct)}</span>` : "";
+  const xs = d.balance.map(p=>p.t), ys = d.balance.map(p=>p.v);
+  Plotly.newPlot("c-asset-equity", [{
+    x:xs, y:ys, type:"scatter", mode:"lines", fill:"tozeroy",
+    line:{color:COL.blue,width:2}, fillcolor:"rgba(59,130,246,0.12)",
+    hovertemplate:"%{x}<br>%{y:.6f} "+ccy+"<extra></extra>"
+  }], layout({ yaxis:{title:"Account balance ("+ccy+")",
+      range: ys.length?[Math.min(...ys)*0.995,Math.max(...ys)*1.005]:undefined},
+    showlegend:false, margin:{l:80,r:16,t:10,b:24} }), CFG);
+  Plotly.newPlot("c-asset-pnl", [{
+    x:d.pnl.map(p=>p.date), y:d.pnl.map(p=>p.net), type:"bar",
+    marker:{color:d.pnl.map(p=>p.net>=0?COL.green:COL.red)},
+    hovertemplate:"%{x}<br>net %{y:.6f} "+ccy+"<extra></extra>"
+  }], layout({ yaxis:{title:"Net P&L / day ("+ccy+")"}, showlegend:false,
+    margin:{l:80,r:16,t:6,b:30} }), CFG);
+}
+function renderBook(){ renderMap(); renderGreeks(); renderLadder(); renderPayoff(true); }
+
+async function renderEquity() {
+  const d = await api("/equity", { subaccount: state.subaccount }); if (!d) return;
+  const hx = d.header || {};
+  if (hx.delta != null) {
+    const cls = hx.delta>=0?"pos":"neg";
+    document.getElementById("equity-header").innerHTML =
+      `<span class="${cls}" style="font-weight:800">${usdK(hx.delta)} since ${hx.since} · ${pct(hx.pct)}</span>`;
+  }
+  const xs = d.equity.map(p=>p.t), ys = d.equity.map(p=>p.v);
+  Plotly.newPlot("c-equity", [{
+    x: xs, y: ys, type:"scatter", mode:"lines", fill:"tozeroy",
+    line:{color:COL.blue,width:2}, fillcolor:"rgba(59,130,246,0.12)", name:"Equity"
+  }], layout({ yaxis:{title:"Account equity (USD)", range: ys.length?[Math.min(...ys)*0.98,Math.max(...ys)*1.02]:undefined},
+    xaxis:{}, showlegend:false, margin:{l:64,r:16,t:10,b:24} }), CFG);
+  Plotly.newPlot("c-pnl", [{
+    x: d.pnl.map(p=>p.date), y: d.pnl.map(p=>p.net), type:"bar",
+    marker:{color: d.pnl.map(p=>p.net>=0?COL.green:COL.red)},
+    hovertemplate:"%{x}<br>net %{y:$,.0f}<extra></extra>"
+  }], layout({ yaxis:{title:"Net P&L / day"}, showlegend:false, margin:{l:64,r:16,t:6,b:30} }), CFG);
+}
+
+async function renderMap() {
+  const d = await api("/position-map", { underlying: state.underlying, subaccount: state.subaccount });
+  if (!d) return;
+  const yv = d.strikes, xv = d.expiries;
+  const z = yv.map(k => xv.map(e => {
+    const c = d.cells.find(c=>c.strike===k && c.expiry===e); return c ? c.net : null; }));
+  const txt = z.map(r=>r.map(v=> v==null?"":(v>0?"+":"")+Math.round(v)));
+  const shapes = [], ann = [];
+  if (d.spot!=null && yv.length>1) {
+    // fractional y-index of spot among sorted strikes
+    let idx = 0; for (let i=0;i<yv.length-1;i++){ if(d.spot>=yv[i]&&d.spot<=yv[i+1]){ idx=i+(d.spot-yv[i])/(yv[i+1]-yv[i]); break;} if(d.spot>yv[yv.length-1]) idx=yv.length-1; }
+    shapes.push({type:"line",xref:"paper",x0:0,x1:1,yref:"y",y0:idx,y1:idx,line:{color:"#cfd6e0",width:1,dash:"dash"}});
+    ann.push({xref:"paper",x:0.01,y:idx,yref:"y",text:`spot ~ $${(d.spot/1000).toFixed(1)}k`,showarrow:false,font:{color:"#cfd6e0",size:11},xanchor:"left",yanchor:"bottom"});
+  }
+  Plotly.newPlot("c-map", [{
+    z, x:xv, y:yv.map(k=>"$"+(k/1000)+"k"), type:"heatmap",
+    colorscale:[[0,"#e5484d"],[0.5,"#1b1f26"],[1,COL.blue]], zmid:0,
+    text:txt, texttemplate:"%{text}", textfont:{color:"#fff",size:12},
+    colorbar:{title:"net", thickness:10}, hovertemplate:"strike %{y}<br>%{x}<br>net %{z}<extra></extra>"
+  }], layout({ xaxis:{title:"Expiry",type:"category"}, yaxis:{title:"Strike",type:"category"},
+    shapes, annotations:ann, margin:{l:64,r:16,t:10,b:36} }), CFG);
+}
+
+async function renderGreeks() {
+  const d = await api("/greeks", { underlying: state.underlying, subaccount: state.subaccount });
+  if (!d) return;
+  const vColors = d.vega.map(v=>v>=0?COL.blue:COL.red);
+  const tColors = d.theta.map(v=>v>=0?COL.green:COL.red);
+  Plotly.newPlot("c-greeks", [
+    {x:d.expiries,y:d.vega,type:"bar",name:"Net vega",marker:{color:vColors},yaxis:"y",xaxis:"x"},
+    {x:d.expiries,y:d.theta,type:"bar",name:"Net theta",marker:{color:tColors},yaxis:"y2",xaxis:"x2"},
+  ], layout({
+    grid:{rows:2,columns:1,pattern:"independent",roworder:"top to bottom"},
+    yaxis:{title:"Net vega ($)",domain:[0.56,1]}, xaxis:{anchor:"y",type:"category",showticklabels:false},
+    yaxis2:{title:"Net theta ($)",domain:[0,0.44]}, xaxis2:{anchor:"y2",type:"category",title:"Expiry"},
+    showlegend:false, margin:{l:64,r:16,t:10,b:36}
+  }), CFG);
+}
+
+async function renderLadder() {
+  const d = await api("/ladder", { underlying: state.underlying, subaccount: state.subaccount });
+  if (!d) return;
+  Plotly.newPlot("c-ladder", [
+    {y:d.expiries,x:d.calls,name:"Calls",type:"bar",orientation:"h",marker:{color:COL.blue}},
+    {y:d.expiries,x:d.puts,name:"Puts",type:"bar",orientation:"h",marker:{color:COL.orange}},
+  ], layout({ barmode:"stack", xaxis:{title:"Premium at risk (USD)"}, yaxis:{type:"category"},
+    margin:{l:80,r:16,t:10,b:36} }), CFG);
+}
+
+let payoffExpiriesLoaded = false;
+async function renderPayoff(resetExpiry) {
+  const exSel = document.getElementById("f-expiry");
+  const d = await api("/payoff", { underlying: state.underlying, subaccount: state.subaccount,
+                                   expiry: resetExpiry ? "" : exSel.value }); if (!d) return;
+  fillSelect(exSel, d.expiries); if (d.expiry) exSel.value = d.expiry;
+  const g = d.spot_grid, ae = d.at_expiry;
+  const pos = ae.map(v=>v>0?v:0), neg = ae.map(v=>v<0?v:0);
+  const shapes = [], ann = [];
+  if (d.spot!=null){ shapes.push({type:"line",x0:d.spot,x1:d.spot,yref:"paper",y0:0,y1:1,line:{color:"#cfd6e0",width:1,dash:"dot"}});
+    ann.push({x:d.spot,yref:"paper",y:1,text:"spot",showarrow:false,font:{color:"#cfd6e0",size:11},yanchor:"bottom"}); }
+  (d.breakevens||[]).forEach(b=>{ shapes.push({type:"line",x0:b,x1:b,yref:"paper",y0:0,y1:1,line:{color:"#5a6472",width:1,dash:"dot"}});
+    ann.push({x:b,yref:"paper",y:0.06,text:"BE $"+(b/1000).toFixed(1)+"k",showarrow:false,font:{color:"#8b93a1",size:10}}); });
+  Plotly.newPlot("c-payoff", [
+    {x:g,y:pos,type:"scatter",mode:"lines",line:{width:0},fill:"tozeroy",fillcolor:"rgba(34,197,94,0.18)",hoverinfo:"skip",showlegend:false},
+    {x:g,y:neg,type:"scatter",mode:"lines",line:{width:0},fill:"tozeroy",fillcolor:"rgba(239,68,68,0.16)",hoverinfo:"skip",showlegend:false},
+    {x:g,y:ae,type:"scatter",mode:"lines",name:"P&L at expiry",line:{color:COL.blue,width:2.5}},
+    {x:g,y:d.t0,type:"scatter",mode:"lines",name:"P&L today (T+0)",line:{color:COL.orange,width:2,dash:"dash"}},
+  ], layout({ xaxis:{title:"Underlying price"}, yaxis:{title:"Strategy P&L (USD)"},
+    shapes, annotations:ann, margin:{l:64,r:16,t:10,b:36} }), CFG);
+}
+boot();
+</script>
+{% endblock %}

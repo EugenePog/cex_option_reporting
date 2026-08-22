@@ -82,6 +82,26 @@ def history(loop: bool = typer.Option(False, help="Run the daily history schedul
         typer.echo(f"History collect complete. ingest_id={ingest_id}")
 
 
+@app.command("set-password")
+def set_password(email: str = typer.Argument(...),
+                 password: str = typer.Option(..., prompt=True, hide_input=True,
+                                              confirmation_prompt=True)) -> None:
+    """Set (or reset) a portal user's login password."""
+    setup_logging()
+    from sqlalchemy import select
+
+    from app.db.base import session_scope
+    from app.db.models_core import CoreUser
+    from app.web.security import hash_password
+
+    with session_scope() as s:
+        user = s.execute(select(CoreUser).where(CoreUser.email == email)).scalar_one_or_none()
+        if user is None:
+            raise typer.BadParameter(f"No user with email {email!r} (seed core first).")
+        user.password_hash = hash_password(password)
+    typer.echo(f"Password set for {email}.")
+
+
 @app.command()
 def backfill() -> None:
     """Collect the full available history depth from the exchange (manual, one-off)."""

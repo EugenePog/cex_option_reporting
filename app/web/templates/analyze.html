@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Analyze · CEX Option Reporting{% endblock %}
+{% block nav_analyze %}active{% endblock %}
+{% block body %}
+<h1 class="page">Analyze</h1>
+<p class="sub">Every stat recomputes as filters change — one filter-driven view over all closed positions.</p>
+
+<div class="filters">
+  <div class="fld"><label>Symbol</label><select id="f-underlying"></select></div>
+  <div class="fld"><label>Strategy</label><select id="f-strategy"></select></div>
+  <div class="fld"><label>Account</label><select id="f-subaccount"></select></div>
+  <div class="fld"><label>Date range</label>
+    <select id="f-period">
+      <option value="90d">Last 90 days</option><option value="30d">Last 30 days</option>
+      <option value="mtd">Month to date</option><option value="ytd">Year to date</option>
+      <option value="all" selected>All time</option>
+    </select></div>
+  <span class="spacer" style="flex:1"></span>
+  <div class="badge" id="deal-count" style="align-self:center">– deals</div>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><div class="label">Net P&amp;L</div><div class="val" id="k-netpnl">–</div><div class="sub" id="k-return"></div></div>
+  <div class="kpi"><div class="label">Win rate</div><div class="val" id="k-winrate">–</div><div class="sub" id="k-wl"></div></div>
+  <div class="kpi"><div class="label">Avg win / loss</div><div class="val" id="k-avg">–</div><div class="sub" id="k-avgsub"></div></div>
+  <div class="kpi"><div class="label">Profit factor</div><div class="val" id="k-pf">–</div><div class="sub">gross win ÷ loss</div></div>
+  <div class="kpi"><div class="label">Max drawdown</div><div class="val" id="k-dd">–</div><div class="sub">peak-to-trough</div></div>
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Strategy performance</h2><p class="hint">Key metrics per strategy — click a row to drill into deals.</p>
+    <table><thead><tr><th>Strategy</th><th>Deals</th><th>Win %</th><th>Net P&amp;L</th><th>Avg / deal</th><th>PF</th></tr></thead>
+    <tbody id="strat-body"></tbody></table>
+  </div>
+  <div class="card"><h2>Symbol performance</h2><p class="hint">Net P&amp;L by underlying.</p>
+    <div id="c-symbol" class="chart tall"></div></div>
+</div>
+
+<div class="card" id="deals-card" style="margin-top:18px;display:none">
+  <h2>Deals <span class="muted" id="deals-title"></span></h2>
+  <table><thead><tr><th>Instrument</th><th>Side</th><th>Close</th><th>Opened</th><th>Closed</th>
+    <th>Entry</th><th>Exit</th><th>Size</th><th>Realized</th><th>Hold d</th></tr></thead>
+  <tbody id="deals-body"></tbody></table>
+</div>
+
+<script>
+const state = { underlying:"", strategy:"", subaccount:"", period:"all" };
+
+async function boot(){
+  const f = await api("/filters"); if(!f) return;
+  fillSelect(document.getElementById("f-underlying"), f.underlyings, {blank:"All symbols"});
+  fillSelect(document.getElementById("f-strategy"), f.strategies, {value:"id",label:"name",blank:"All strategies"});
+  fillSelect(document.getElementById("f-subaccount"), f.subaccounts.map(id=>({id,name:"Account "+id})), {value:"id",label:"name",blank:"All accounts"});
+  for (const [id,key] of [["f-underlying","underlying"],["f-strategy","strategy"],["f-subaccount","subaccount"],["f-period","period"]])
+    document.getElementById(id).onchange = e => { state[key]=e.target.value; refresh(); };
+  refresh();
+}
+
+async function refresh(){
+  const d = await api("/analyze", state); if(!d) return;
+  const k = d.kpis;
+  document.getElementById("deal-count").textContent = (k.n_deals||0).toLocaleString()+" deals";
+  const net = document.getElementById("k-netpnl");
+  net.textContent = usdK(k.net_pnl); net.className = "val "+signCls(k.net_pnl);
+  document.getElementById("k-return").innerHTML = k.return_pct==null?"":`<span class="${signCls(k.return_pct)}">${pct(k.return_pct)} return</span>`;
+  document.getElementById("k-winrate").textContent = k.win_rate==null?"–":(k.win_rate*100).toFixed(1)+"%";
+  const wins = Math.round((k.win_rate||0)*(k.n_deals||0));
+  document.getElementById("k-wl").textContent = `${wins} W / ${(k.n_deals||0)-wins} L`;
+  const ratio = (k.avg_win!=null && k.avg_loss) ? (k.avg_win/Math.abs(k.avg_loss)) : null;
+  document.getElementById("k-avg").textContent = ratio==null?"–":ratio.toFixed(2)+"×";
+  document.getElementById("k-avgsub").textContent =
+    (k.avg_win!=null?usdK(k.avg_win):"–")+" vs "+(k.avg_loss!=null?usdK(k.avg_loss):"–");
+  document.getElementById("k-pf").textContent = k.profit_factor==null?"–":k.profit_factor.toFixed(2);
+  const dd = document.getElementById("k-dd");
+  dd.textContent = k.max_drawdown_pct==null?"–":"−"+k.max_drawdown_pct.toFixed(1)+"%"; dd.className="val neg";
+
+  // strategy table
+  const tb = document.getElementById("strat-body"); tb.innerHTML="";
+  for (const r of d.strategies){
+    const tr=document.createElement("tr"); tr.onclick=()=>showDeals(r.strategy_id, r.name);
+    tr.innerHTML = `<td><span class="dot" style="background:${r.color||'#888'}"></span>${r.name}</td>
+      <td>${r.n_deals}</td><td>${r.win_rate==null?'–':(r.win_rate*100).toFixed(0)+'%'}</td>
+      <td class="${signCls(r.net_pnl)}">${usdK(r.net_pnl)}</td>
+      <td>${r.avg_pnl_per_deal==null?'–':usdK(r.avg_pnl_per_deal)}</td>
+      <td>${r.profit_factor==null?'–':r.profit_factor.toFixed(2)}</td>`;
+    tb.appendChild(tr);
+  }
+  // symbol bars
+  const syms = d.symbols;
+  Plotly.newPlot("c-symbol", [{
+    type:"bar", orientation:"h", y:syms.map(s=>s.underlying), x:syms.map(s=>s.net_pnl),
+    marker:{color: syms.map(s=>s.net_pnl>=0?COL.blue:COL.red)},
+    hovertemplate:"%{y}<br>net %{x:$,.0f}<extra></extra>"
+  }], layout({ xaxis:{title:"Net P&L (USD)"}, yaxis:{type:"category",autorange:"reversed"},
+    showlegend:false, margin:{l:70,r:16,t:10,b:36} }), CFG);
+}
+
+async function showDeals(strategyId, name){
+  const d = await api("/deals", {...state, strategy: strategyId}); if(!d) return;
+  document.getElementById("deals-card").style.display="block";
+  document.getElementById("deals-title").textContent = "· "+name;
+  const tb=document.getElementById("deals-body"); tb.innerHTML="";
+  for (const r of d.deals){
+    const tr=document.createElement("tr");
+    tr.innerHTML = `<td>${r.inst_id}</td><td>${r.side||''}</td><td>${r.close_type||''}</td>
+      <td>${(r.opened_at||'').slice(0,10)}</td><td>${(r.closed_at||'').slice(0,10)}</td>
+      <td>${r.entry_px}</td><td>${r.exit_px}</td><td>${r.size}</td>
+      <td class="${signCls(r.realized_pnl)}">${r.realized_pnl.toFixed(6)}</td><td>${r.hold_days??''}</td>`;
+    tb.appendChild(tr);
+  }
+  document.getElementById("deals-card").scrollIntoView({behavior:"smooth"});
+}
+boot();
+</script>
+{% endblock %}

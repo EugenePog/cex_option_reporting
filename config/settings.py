@@ -1,8 +1,10 @@
 """Environment-driven configuration (pydantic-settings). One Settings object, imported everywhere."""
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
+from dotenv import dotenv_values
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -37,6 +39,48 @@ class Settings(BaseSettings):
             api_secret=self.okx_k_api_secret,
             passphrase=self.okx_k_passphrase,
             flag=self.okx_k_flag,
+        )
+
+    # --- Multi-account credentials ---------------------------------------- #
+    # Each core.cex_account has a `label` (e.g. "OKX_K", "OKX_M_HEDGE"). Its API
+    # credentials live in the environment under that label as a prefix:
+    #     <LABEL>_API_KEY / <LABEL>_API_SECRET / <LABEL>_PASSPHRASE / <LABEL>_FLAG
+    # This is the multi-account convention: one credential block per account.
+    # (In production these move to the encrypted columns on core.cex_account.)
+    def _env_map(self) -> dict[str, str]:
+        """Merged view of the .env file plus the process environment (process env wins).
+
+        pydantic-settings only loads *declared* fields from .env, so per-account
+        credentials keyed by an arbitrary label are invisible to the Settings schema.
+        Read them straight from the .env file and os.environ instead.
+        """
+        merged: dict[str, str] = {}
+        env_file = self.model_config.get("env_file")
+        if env_file:
+            merged.update({k: v for k, v in dotenv_values(env_file).items() if v is not None})
+        merged.update(os.environ)
+        return merged
+
+    def credentials_for_label(self, label: str) -> "Credentials":
+        """Build a connector Credentials object from the <LABEL>_* env vars.
+
+        For label "OKX_M_HEDGE" this reads OKX_M_HEDGE_API_KEY / _API_SECRET /
+        _PASSPHRASE / _FLAG. Missing values come back empty so the caller can
+        detect an unconfigured account and skip it.
+        """
+        from app.connectors.base import Credentials
+
+        env = self._env_map()
+        prefix = label.strip().upper()
+
+        def _clean(value: str | None) -> str:
+            return (value or "").strip().strip("'\"").strip()
+
+        return Credentials(
+            api_key=_clean(env.get(f"{prefix}_API_KEY")),
+            api_secret=_clean(env.get(f"{prefix}_API_SECRET")),
+            passphrase=_clean(env.get(f"{prefix}_PASSPHRASE")),
+            flag=_clean(env.get(f"{prefix}_FLAG")) or "0",
         )
 
     # Pipeline cadence (seconds) for `pipeline --loop`

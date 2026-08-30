@@ -13,25 +13,30 @@ import logging
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app.ingestion.collector import make_okx_k_collector
+from app.ingestion.collector import iter_account_collectors
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 
 def _run_snapshot() -> None:
-    try:
-        make_okx_k_collector().collect_snapshot()
-    except Exception:  # noqa: BLE001 - already logged; keep the scheduler alive
-        logger.exception("scheduled snapshot collect raised; scheduler continues")
+    # Fan out over every configured account; one failure never stops the others.
+    for collector in iter_account_collectors():
+        label = collector.writer.account_label
+        try:
+            collector.collect_snapshot()
+        except Exception:  # noqa: BLE001 - already logged; keep the scheduler alive
+            logger.exception("scheduled snapshot collect raised for %s; scheduler continues", label)
 
 
 def _run_history() -> None:
     settings = get_settings()
-    try:
-        make_okx_k_collector().collect_history(lookback_days=settings.ingest_daily_lookback_days)
-    except Exception:  # noqa: BLE001
-        logger.exception("scheduled history collect raised; scheduler continues")
+    for collector in iter_account_collectors():
+        label = collector.writer.account_label
+        try:
+            collector.collect_history(lookback_days=settings.ingest_daily_lookback_days)
+        except Exception:  # noqa: BLE001
+            logger.exception("scheduled history collect raised for %s; scheduler continues", label)
 
 
 def run_snapshot_scheduler() -> None:

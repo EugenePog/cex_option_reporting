@@ -1,2 +1,4 @@
 id,cex_account_id,cex_code,subacct_name,display_name,is_active
-1,1,OKX,,Main,true
+1,1,OKX,,Straddle sell,true
+2,2,OKX,,Hedge,true
+3,3,OKX,,Main,true

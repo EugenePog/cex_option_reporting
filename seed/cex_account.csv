@@ -1,2 +1,4 @@
 id,user_id,cex_code,label,flag
 1,2,OKX,OKX_K,0
+2,2,OKX,OKX_M_HEDGE,0
+3,3,OKX,OKX_E,0

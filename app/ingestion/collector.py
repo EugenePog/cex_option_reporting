@@ -16,6 +16,8 @@ import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import func
+
 from app.connectors.base import BaseCexConnector
 from app.ingestion.bronze_writer import BronzeWriter
 
@@ -129,3 +131,55 @@ def make_okx_k_collector() -> Collector:
     connector = make_connector("OKX", s.okx_k_credentials())
     writer = BronzeWriter(cex_code="OKX", account_label=s.okx_k_account_label)
     return Collector(connector, writer)
+
+
+# --------------------------------------------------------------------------- #
+# Multi-account wiring — one Collector per row in core.cex_account.
+# --------------------------------------------------------------------------- #
+def iter_account_collectors(only_label: str | None = None) -> list[Collector]:
+    """Build one Collector per configured CEX account (core.cex_account).
+
+    Each account's credentials are resolved from env vars keyed by its `label`
+    (see Settings.credentials_for_label). Accounts whose credentials are not set
+    are skipped with a warning so one misconfigured account can't block the rest.
+
+    `only_label` restricts the fan-out to a single account label (case-insensitive).
+    Returns an empty list if no accounts match / are configured.
+    """
+    from sqlalchemy import select
+
+    from app.connectors import make_connector
+    from app.db.base import session_scope
+    from app.db.models_core import CexAccount
+    from config.settings import get_settings
+
+    settings = get_settings()
+
+    # Read the account rows and detach immediately (plain tuples, no ORM session held).
+    with session_scope() as session:
+        stmt = select(CexAccount.cex_code, CexAccount.label).order_by(CexAccount.id)
+        if only_label is not None:
+            stmt = stmt.where(func.lower(CexAccount.label) == only_label.strip().lower())
+        rows = session.execute(stmt).all()
+
+    collectors: list[Collector] = []
+    for cex_code, label in rows:
+        creds = settings.credentials_for_label(label)
+        if not creds.api_key or not creds.api_secret:
+            logger.warning(
+                "cex_account %r (%s): no API credentials in env "
+                "(expected %s_API_KEY / %s_API_SECRET); skipping this account",
+                label, cex_code, label.upper(), label.upper(),
+            )
+            continue
+        connector = make_connector(cex_code, creds)
+        writer = BronzeWriter(cex_code=cex_code, account_label=label)
+        collectors.append(Collector(connector, writer))
+
+    if not collectors:
+        logger.warning(
+            "no CEX account collectors built%s — seed core.cex_account and set "
+            "per-label credentials in .env",
+            f" for label {only_label!r}" if only_label else "",
+        )
+    return collectors

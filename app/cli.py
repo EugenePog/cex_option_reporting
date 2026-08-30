@@ -47,10 +47,14 @@ def seed(
 
 
 @app.command()
-def snapshot(loop: bool = typer.Option(False, help="Run the snapshot scheduler (SNAPSHOT_TIMES_UTC).")) -> None:
+def snapshot(
+    loop: bool = typer.Option(False, help="Run the snapshot scheduler (SNAPSHOT_TIMES_UTC)."),
+    label: str = typer.Option(None, help="Only this account label (default: all accounts)."),
+) -> None:
     """Collect point-in-time data (balance/positions/margin/greeks) into bronze.
 
-    --loop runs the scheduler that fires at each SNAPSHOT_TIMES_UTC entry (several times/day).
+    Runs once for EVERY account in core.cex_account (or just --label). --loop runs the
+    scheduler that fires at each SNAPSHOT_TIMES_UTC time (several times/day), over all accounts.
     """
     setup_logging()
     if loop:
@@ -58,17 +62,29 @@ def snapshot(loop: bool = typer.Option(False, help="Run the snapshot scheduler (
 
         run_snapshot_scheduler()
     else:
-        from app.ingestion.collector import make_okx_k_collector
+        from app.ingestion.collector import iter_account_collectors
 
-        ingest_id = make_okx_k_collector().collect_snapshot()
-        typer.echo(f"Snapshot collect complete. ingest_id={ingest_id}")
+        collectors = iter_account_collectors(only_label=label)
+        if not collectors:
+            typer.echo(
+                "No CEX accounts to collect. "
+                "Seed core.cex_account and set per-label creds in .env."
+            )
+            raise typer.Exit(1)
+        for c in collectors:
+            ingest_id = c.collect_snapshot()
+            typer.echo(f"[{c.writer.account_label}] snapshot complete. ingest_id={ingest_id}")
 
 
 @app.command()
-def history(loop: bool = typer.Option(False, help="Run the daily history scheduler (INGEST_TIME_UTC).")) -> None:
+def history(
+    loop: bool = typer.Option(False, help="Run the daily history scheduler (INGEST_TIME_UTC)."),
+    label: str = typer.Option(None, help="Only this account label (default: all accounts)."),
+) -> None:
     """Collect history (fills/closed-positions/bills) over a limited window into bronze.
 
-    --loop runs the scheduler that fires once/day at INGEST_TIME_UTC.
+    Runs once for EVERY account in core.cex_account (or just --label). --loop runs the
+    scheduler that fires once/day at INGEST_TIME_UTC, also over all accounts.
     """
     setup_logging()
     if loop:
@@ -76,10 +92,18 @@ def history(loop: bool = typer.Option(False, help="Run the daily history schedul
 
         run_history_scheduler()
     else:
-        from app.ingestion.collector import make_okx_k_collector
+        from app.ingestion.collector import iter_account_collectors
 
-        ingest_id = make_okx_k_collector().collect_history()
-        typer.echo(f"History collect complete. ingest_id={ingest_id}")
+        collectors = iter_account_collectors(only_label=label)
+        if not collectors:
+            typer.echo(
+                "No CEX accounts to collect. "
+                "Seed core.cex_account and set per-label creds in .env."
+            )
+            raise typer.Exit(1)
+        for c in collectors:
+            ingest_id = c.collect_history()
+            typer.echo(f"[{c.writer.account_label}] history complete. ingest_id={ingest_id}")
 
 
 @app.command("set-password")
@@ -103,13 +127,26 @@ def set_password(email: str = typer.Argument(...),
 
 
 @app.command()
-def backfill() -> None:
-    """Collect the full available history depth from the exchange (manual, one-off)."""
-    setup_logging()
-    from app.ingestion.collector import make_okx_k_collector
+def backfill(
+    label: str = typer.Option(None, help="Only this account label (default: all accounts)."),
+) -> None:
+    """Collect the full available history depth from the exchange (manual, one-off).
 
-    ingest_id = make_okx_k_collector().backfill()
-    typer.echo(f"Backfill complete. ingest_id={ingest_id}")
+    Runs for EVERY account in core.cex_account unless --label narrows it to one.
+    """
+    setup_logging()
+    from app.ingestion.collector import iter_account_collectors
+
+    collectors = iter_account_collectors(only_label=label)
+    if not collectors:
+        typer.echo(
+            "No CEX accounts to backfill. "
+            "Seed core.cex_account and set per-label creds in .env."
+        )
+        raise typer.Exit(1)
+    for c in collectors:
+        ingest_id = c.backfill()
+        typer.echo(f"[{c.writer.account_label}] backfill complete. ingest_id={ingest_id}")
 
 
 @app.command()

@@ -1,3 +1,7 @@
 id,subaccount_id,name,description,color
 1,1,daily-short-straddle,Daily short straddle,#4c9aff
 2,1,unassigned,Fallback bucket for unmatched positions,#888888
+3,2,Hedge box,Hedge box strategy,#4c9aff
+4,2,unassigned,Fallback bucket for unmatched positions,#888888
+5,3,holding,Holding assets,#4c9aff
+6,3,unassigned,Fallback bucket for unmatched positions,#888888

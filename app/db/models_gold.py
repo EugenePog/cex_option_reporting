@@ -70,6 +70,21 @@ class UnderlyingPrice(Base):
     fwd_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
 
+class ExpirySettlement(Base):
+    """Grain: (subaccount_id, underlying, expiry). Official OKX settlement price at expiry
+    (from delivery bills) — the true expiration price for report ②'s expired-mode marker."""
+
+    __tablename__ = "expiry_settlement"
+    __table_args__ = (UniqueConstraint("subaccount_id", "underlying", "expiry",
+                                       name="uq_gold_expiry_settlement"), {"schema": GOLD})
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    subaccount_id: Mapped[int] = _sub_fk()
+    underlying: Mapped[str] = mapped_column(String(32), index=True)
+    expiry: Mapped[date] = mapped_column(Date, index=True)
+    settle_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AssetBalanceTimeseries(Base):
     """Grain: (subaccount_id, ccy, captured_at). Per-asset balance in coin + its USD value.
 

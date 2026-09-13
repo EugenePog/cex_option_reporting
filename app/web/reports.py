@@ -22,6 +22,7 @@ from app.db.models_gold import (
     DealLedger,
     GreeksByExpiry,
     PnlDaily,
+    ExpirySettlement,
     PositionCurrent,
     UnderlyingPrice,
 )
@@ -260,7 +261,17 @@ def ladder(underlying: str | None = None, subaccount: int | None = None,
 
 # ② Payoff / risk profile -------------------------------------------------- #
 def _settlement_price(s, subs, underlying, chosen) -> float | None:
-    """Underlying price at expiry ≈ idx_px of the latest gold.underlying_price on/before that day."""
+    """Expiration price: prefer the OKX official settlement (gold.expiry_settlement, from delivery
+    bills); fall back to the nearest gold.underlying_price snapshot on/before the expiry day."""
+    eq = select(ExpirySettlement.settle_price).where(
+        ExpirySettlement.subaccount_id.in_(subs), ExpirySettlement.expiry == chosen,
+        ExpirySettlement.settle_price.isnot(None))
+    if underlying:
+        eq = eq.where(ExpirySettlement.underlying == underlying)
+    row = s.execute(eq.limit(1)).first()
+    if row:
+        return _f(row[0])
+    # fallback: snapshot proxy
     hi = datetime.combine(chosen, time.max, tzinfo=timezone.utc)
     q = (select(UnderlyingPrice.idx_px)
          .where(UnderlyingPrice.subaccount_id.in_(subs), UnderlyingPrice.idx_px.isnot(None),

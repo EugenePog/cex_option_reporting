@@ -135,6 +135,35 @@ class TradeFill(Base):
     ingest_id: Mapped[str] = mapped_column(String(36))
 
 
+class Bill(Base):
+    """Account ledger entries (parsed from bronze.raw_bill). Delivery rows (bill_type='3') carry
+    the underlying **settlement price** (`px`) at expiry — the source for report ②'s expiry marker."""
+
+    __tablename__ = "bill"
+    __table_args__ = (
+        UniqueConstraint("cex_code", "bill_id", name="uq_silver_bill"),
+        {"schema": SILVER},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cex_code: Mapped[str] = mapped_column(String(16))
+    subaccount_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.subaccount.id"), index=True)
+    bill_id: Mapped[str] = mapped_column(String(64), index=True)
+    inst_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    underlying: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    opt_type: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    strike: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    expiry: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    bill_type: Mapped[str | None] = mapped_column(String(8), nullable=True, index=True)
+    sub_type: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    px: Mapped[float | None] = mapped_column(Numeric, nullable=True)      # settlement/fill price
+    pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    fee: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    ccy: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    billed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingest_id: Mapped[str] = mapped_column(String(36))
+
+
 class ClosedPosition(Base):
     """Closed positions incl. expiry/delivery — typed realized PnL, one row per closed position."""
 

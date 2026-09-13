@@ -26,6 +26,7 @@ from app.db.models_gold import (
     ClientPerformance,
     ClientPnlDaily,
     DealLedger,
+    ExpirySettlement,
     GreeksByExpiry,
     PnlDaily,
     PositionCurrent,
@@ -36,6 +37,7 @@ from app.db.models_gold import (
 )
 from app.db.models_silver import (
     BalanceSnapshot,
+    Bill,
     ClosedPosition,
     PositionSnapshot,
 )
@@ -46,8 +48,8 @@ logger = logging.getLogger(__name__)
 _GOLD_TABLES = [  # truncated in this order at the start of each rebuild
     "balance_timeseries", "asset_balance_timeseries", "pnl_daily", "asset_pnl_daily",
     "strategy_summary", "deal_ledger", "position_current", "underlying_price",
-    "greeks_by_expiry", "client_pnl_daily", "client_performance", "strategy_performance",
-    "symbol_performance",
+    "expiry_settlement", "greeks_by_expiry", "client_pnl_daily", "client_performance",
+    "strategy_performance", "symbol_performance",
 ]
 
 
@@ -91,6 +93,7 @@ def run() -> dict[str, int]:
         eod = _eod_equity(s)  # end-of-day USD equity per (subaccount, day) — used by rollups
         counts["position_current"] = _build_position_current(s)
         counts["underlying_price"] = _build_underlying_price(s)
+        counts["expiry_settlement"] = _build_expiry_settlement(s)
         counts["greeks_by_expiry"] = _build_greeks_by_expiry(s)
         counts["strategy_summary"] = _build_strategy_summary(s, today)
         counts["deal_ledger"] = _build_deal_ledger(s)
@@ -189,6 +192,22 @@ def _build_underlying_price(s) -> int:
         s.add(UnderlyingPrice(subaccount_id=sub_id, underlying=uly, captured_at=cap,
                               idx_px=idx, fwd_px=fwd))
     return len(rows)
+
+
+def _build_expiry_settlement(s) -> int:
+    # official settlement price per (subaccount, underlying, expiry) from delivery bills (type '3')
+    agg: dict[tuple, tuple] = {}  # key -> (settle_price, settled_at)
+    for b in s.execute(select(Bill).where(Bill.bill_type == "3")).scalars():
+        if b.underlying is None or b.expiry is None or b.px is None:
+            continue
+        key = (b.subaccount_id, b.underlying, b.expiry)
+        # all legs of an expiry share the same settlement px; keep the latest billed_at
+        if key not in agg or (b.billed_at and agg[key][1] and b.billed_at > agg[key][1]):
+            agg[key] = (_fl(b.px), b.billed_at)
+    for (sub_id, uly, exp), (px, at) in agg.items():
+        s.add(ExpirySettlement(subaccount_id=sub_id, underlying=uly, expiry=exp,
+                               settle_price=px, settled_at=at))
+    return len(agg)
 
 
 def _build_position_current(s) -> int:

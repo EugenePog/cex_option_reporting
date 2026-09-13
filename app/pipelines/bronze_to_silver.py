@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.db.base import session_scope
 from app.db.models import (
     RawBalance,
+    RawBill,
     RawClosedPosition,
     RawMargin,
     RawOptSummary,
@@ -25,6 +26,7 @@ from app.db.models import (
 from app.db.models_core import CexAccount, Strategy, StrategyRule, Subaccount
 from app.db.models_silver import (
     BalanceSnapshot,
+    Bill,
     ClosedPosition,
     MarginSnapshot,
     PositionSnapshot,
@@ -242,6 +244,28 @@ def _transform_closed(session, lk: _Lookups) -> tuple[int, int]:
     return written, skipped
 
 
+def _transform_bills(s, lk: _Lookups) -> tuple[int, int]:
+    written = skipped = 0
+    for b in s.execute(select(RawBill)).scalars():
+        sub_id = lk.resolve_subaccount(b.cex_code, b.account_label, b.subacct_name)
+        if sub_id is None:
+            skipped += 1
+            continue
+        p = b.payload
+        inst_id = p.get("instId") or None
+        parsed = parse_inst_id(inst_id or "")
+        _upsert(s, Bill, {
+            "cex_code": b.cex_code, "subaccount_id": sub_id, "bill_id": b.bill_id,
+            "inst_id": inst_id, "underlying": parsed.underlying, "opt_type": parsed.opt_type,
+            "strike": parsed.strike, "expiry": parsed.expiry,
+            "bill_type": p.get("type"), "sub_type": p.get("subType"),
+            "px": _f(p.get("px")), "pnl": _f(p.get("pnl")), "fee": _f(p.get("fee")),
+            "ccy": p.get("ccy"), "billed_at": _ts(p.get("ts")), "ingest_id": b.ingest_id,
+        }, ["cex_code", "bill_id"])
+        written += 1
+    return written, skipped
+
+
 def run() -> dict[str, tuple[int, int]]:
     """Run all bronze->silver transforms. Returns {table: (written, skipped_unresolved)}."""
     with session_scope() as s:
@@ -255,6 +279,7 @@ def run() -> dict[str, tuple[int, int]]:
             "position_snapshot": _transform_positions(s, lk),
             "trade_fill": _transform_fills(s, lk),
             "closed_position": _transform_closed(s, lk),
+            "bill": _transform_bills(s, lk),
         }
     for table, (written, skipped) in results.items():
         logger.info("silver %s: %d written, %d skipped (unresolved subaccount)",

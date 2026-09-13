@@ -60,6 +60,19 @@ SELECT (SELECT exp FROM e) AS expiry,
      WHERE up.underlying = :'uly' AND up.captured_at <= (e.exp + INTERVAL '1 day')
      ORDER BY up.captured_at DESC LIMIT 1) AS settlement_at;
 
+\echo '\n===== 7. is the REAL settlement price already in bronze bills (delivery, type 3)? ====='
+\echo '(if payload has a px/settlement field, we can source the true expiration price without a new API call)'
+SELECT payload->>'instId' inst, payload->>'type' type, payload->>'subType' sub,
+       payload->>'px' px, payload->>'pnl' pnl, payload->>'ccy' ccy,
+       to_timestamp((payload->>'ts')::bigint/1000) AT TIME ZONE 'UTC' ts
+FROM bronze.raw_bill
+WHERE payload->>'type' = '3'          -- delivery/exercise
+ORDER BY ts DESC LIMIT 20;
+
+\echo '\n===== 7b. all distinct keys present on a delivery bill (to spot a settlement-price field) ====='
+SELECT DISTINCT jsonb_object_keys(payload) key
+FROM bronze.raw_bill WHERE payload->>'type' = '3' ORDER BY 1;
+
 \echo '\n================ how to read this ================'
 \echo 'S2: if position_snapshot.earliest is AFTER most deal_ledger expiries -> underlying_price'
 \echo '    cannot cover them -> "no expiration price". Fix = ingest a real settlement price source'

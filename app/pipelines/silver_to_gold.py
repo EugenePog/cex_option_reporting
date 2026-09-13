@@ -145,13 +145,14 @@ def _asset_of(underlying: str | None) -> str | None:
 
 
 def _build_asset_pnl_daily(s) -> int:
-    # realized + fees per (subaccount, ccy, day) from closed positions (coin-denominated)
-    agg: dict[tuple, dict] = defaultdict(lambda: dict(real=0.0, fee=0.0))
+    # coin-denominated. OKX realizedPnl already NETS fees (= pnl + fee + funding), so it IS net_pnl;
+    # gross realized is derived as net - fees (fee is negative), and fees are shown separately.
+    agg: dict[tuple, dict] = defaultdict(lambda: dict(net=0.0, fee=0.0))
     for cp in s.execute(select(ClosedPosition)).scalars():
         if not cp.closed_at or not cp.ccy:
             continue
         k = (cp.subaccount_id, cp.ccy, cp.closed_at.date())
-        agg[k]["real"] += _fl(cp.realized_pnl)
+        agg[k]["net"] += _fl(cp.realized_pnl)   # OKX net (fees included)
         agg[k]["fee"] += _fl(cp.fee)
 
     # end-of-day unrealized (coin) per (subaccount, asset, day) from position snapshots
@@ -167,10 +168,10 @@ def _build_asset_pnl_daily(s) -> int:
     keys = set(agg) | set(eod_level)
     for (sub_id, ccy, d) in keys:
         a = agg.get((sub_id, ccy, d), {})
-        realized, fees = a.get("real", 0.0), a.get("fee", 0.0)
+        net, fees = a.get("net", 0.0), a.get("fee", 0.0)
         s.add(AssetPnlDaily(
-            subaccount_id=sub_id, ccy=ccy, date=d, realized_pnl=realized,
-            unrealized_pnl=eod_level.get((sub_id, ccy, d)), fees=fees, net_pnl=realized - fees))
+            subaccount_id=sub_id, ccy=ccy, date=d, realized_pnl=net - fees,
+            unrealized_pnl=eod_level.get((sub_id, ccy, d)), fees=fees, net_pnl=net))
     return len(keys)
 
 
@@ -277,13 +278,14 @@ def _build_deal_ledger(s) -> int:
 
 
 def _build_pnl_daily(s) -> int:
-    # realized + fees per (subaccount, strategy, day) from closed positions
-    agg: dict[tuple, dict] = defaultdict(lambda: dict(real=0.0, fee=0.0))
+    # OKX realizedPnl already NETS fees (= pnl + fee + funding), so it IS net_pnl; gross realized
+    # is derived as net - fees (fee is negative), fees shown separately.
+    agg: dict[tuple, dict] = defaultdict(lambda: dict(net=0.0, fee=0.0))
     for cp in s.execute(select(ClosedPosition)).scalars():
         if not cp.closed_at:
             continue
         k = (cp.subaccount_id, cp.strategy_id, cp.closed_at.date())
-        agg[k]["real"] += _fl(cp.realized_pnl)
+        agg[k]["net"] += _fl(cp.realized_pnl)   # OKX net (fees included)
         agg[k]["fee"] += _fl(cp.fee)
 
     # end-of-day unrealized level per (subaccount, strategy, day) from position snapshots
@@ -299,12 +301,12 @@ def _build_pnl_daily(s) -> int:
     keys = set(agg) | set(eod_level)
     for (sub_id, strat_id, d) in keys:
         a = agg.get((sub_id, strat_id, d), {})
-        realized = a.get("real", 0.0)
+        net = a.get("net", 0.0)
         fees = a.get("fee", 0.0)
         s.add(PnlDaily(
             subaccount_id=sub_id, strategy_id=strat_id, date=d,
-            realized_pnl=realized, unrealized_pnl=eod_level.get((sub_id, strat_id, d)),
-            fees=fees, net_pnl=realized - fees,
+            realized_pnl=net - fees, unrealized_pnl=eod_level.get((sub_id, strat_id, d)),
+            fees=fees, net_pnl=net,
         ))
     return len(keys)
 

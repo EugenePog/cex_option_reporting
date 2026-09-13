@@ -97,7 +97,7 @@ def run() -> dict[str, int]:
         counts["expiry_settlement"] = _build_expiry_settlement(s)
         counts["greeks_by_expiry"] = _build_greeks_by_expiry(s)
         counts["strategy_summary"] = _build_strategy_summary(s, today)
-        counts["deal_ledger"] = _build_deal_ledger(s)
+        counts["deal_ledger"] = _build_deal_ledger(s, rates)
         counts["pnl_daily"] = _build_pnl_daily(s, rates)
         counts["client_pnl_daily"] = _build_client_pnl_daily(s, sub_user, eod)
         counts.update(_build_performance(s, sub_user, today, now, eod))
@@ -330,18 +330,20 @@ def _build_strategy_summary(s, today: date) -> int:
     return len(keys)
 
 
-def _build_deal_ledger(s) -> int:
+def _build_deal_ledger(s, rates: _CoinUsd) -> int:
     n = 0
     for cp in s.execute(select(ClosedPosition)).scalars():
         hold = None
         if cp.opened_at and cp.closed_at:
             hold = (cp.closed_at - cp.opened_at).days
+        r = rates.rate(cp.subaccount_id, cp.ccy, cp.closed_at.date()) if cp.closed_at else 1.0
         s.add(DealLedger(
             subaccount_id=cp.subaccount_id, strategy_id=cp.strategy_id, inst_id=cp.inst_id,
             underlying=cp.underlying, opt_type=cp.opt_type, strike=cp.strike, expiry=cp.expiry,
             side=cp.side, close_type=_close_type(cp.close_type), opened_at=cp.opened_at,
             closed_at=cp.closed_at, entry_px=cp.open_avg_px, exit_px=cp.close_avg_px,
-            size=cp.size, fee=cp.fee, realized_pnl=cp.realized_pnl, hold_days=hold,
+            size=cp.size, fee=cp.fee, realized_pnl=cp.realized_pnl,
+            realized_pnl_usd=_fl(cp.realized_pnl) * r, hold_days=hold,
         ))
         n += 1
     return n

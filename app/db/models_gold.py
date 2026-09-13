@@ -181,6 +181,7 @@ class DealLedger(Base):
     size: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     fee: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     realized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    realized_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # coin×rate (=①a basis)
     hold_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 

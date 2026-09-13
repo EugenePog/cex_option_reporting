@@ -256,10 +256,18 @@ async function renderPayoff(resetExpiry) {
   const traces = [
     {x:g,y:pos,type:"scatter",mode:"lines",line:{width:0},fill:"tozeroy",fillcolor:"rgba(34,197,94,0.18)",hoverinfo:"skip",showlegend:false},
     {x:g,y:neg,type:"scatter",mode:"lines",line:{width:0},fill:"tozeroy",fillcolor:"rgba(239,68,68,0.16)",hoverinfo:"skip",showlegend:false},
-    {x:g,y:ae,type:"scatter",mode:"lines",name: expiredNote ? "Realized P&L at expiry" : "P&L at expiry",line:{color:COL.blue,width:2.5}},
+    {x:g,y:ae,type:"scatter",mode:"lines",name: expiredNote ? "Payoff at expiry (shape)" : "P&L at expiry",line:{color:COL.blue,width:2.5}},
   ];
   if (!expiredNote && d.t0 && d.t0.length)  // T+0 reprice only meaningful for still-open legs
     traces.push({x:g,y:d.t0,type:"scatter",mode:"lines",name:"P&L today (T+0)",line:{color:COL.orange,width:2,dash:"dash"}});
+  // Expired: mark the REAL OKX realized P&L (gold.deal_ledger, = report ①a) at the settlement price.
+  if (expiredNote && d.realized_usd!=null && m && m.value!=null){
+    const rv = d.realized_usd, rvTxt = (rv<0?"-$":"$")+Math.abs(rv).toFixed(2);
+    traces.push({x:[m.value],y:[rv],type:"scatter",mode:"markers+text",name:"Realized P&L (actual)",
+      marker:{color:COL.green,size:10,line:{color:"#fff",width:1.5}},
+      text:["realized "+rvTxt],textposition:"top center",textfont:{color:"#e6edf7",size:12},
+      hovertemplate:"realized %{y:$,.2f}<extra></extra>"});
+  }
   if (expiredNote)
     ann.push({xref:"paper",x:0.5,yref:"paper",y:1.06,text:"expired "+(d.expiry||""),showarrow:false,font:{color:"#8b93a1",size:11}});
   Plotly.newPlot("c-payoff", traces, layout({ xaxis:{title:"Underlying price"},

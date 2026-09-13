@@ -330,6 +330,7 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
         # underlying units (ctVal). fees_usd accrues the (negative) fee cost to fold into the P&L.
         norm: list[tuple] = []
         fees_usd = 0.0
+        realized_usd = None   # expired only: real OKX realized P&L (deal_ledger), for the marker
         if not chosen_expired and open_legs:            # OPEN: live book → spot marker (with time)
             mode = "open"
             marker_price = next((_f(p.idx_px) for p in open_legs if p.idx_px), None) \
@@ -349,6 +350,7 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
                 or (sum(_f(c.strike) for c in closed_legs) / len(closed_legs))
             marker = {"value": marker_price, "label": "expiry", "time": None}
             include_t0 = False
+            realized_usd = sum(_f(c.realized_pnl_usd) for c in closed_legs)  # real OKX figure (=①a)
             for c in closed_legs:
                 sign = -1.0 if (c.side or "").lower() == "short" else 1.0
                 cs = contract_size(c.underlying)
@@ -394,6 +396,7 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
             bes.append(round(x, 1))
     return {"spot_grid": [round(x, 1) for x in grid], "at_expiry": at_expiry, "t0": t0,
             "breakevens": bes, "marker": marker, "mode": mode,
+            "realized_usd": (round(realized_usd, 2) if realized_usd is not None else None),
             "expiry": chosen.isoformat() if chosen else None,
             "expiries": [e.isoformat() for e in expiries]}
 

@@ -115,6 +115,11 @@ class AssetPnlDaily(Base):
     unrealized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     fees: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     net_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # USD equivalents (coin × coin→USD rate at close), fee-inclusive net:
+    realized_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    unrealized_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    fees_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    net_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
 
 class PnlDaily(Base):
@@ -130,6 +135,11 @@ class PnlDaily(Base):
     unrealized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     fees: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     net_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # USD equivalents (coin × coin→USD rate at close); net_pnl_usd is fee-inclusive (OKX nets fees):
+    realized_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    unrealized_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    fees_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    net_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
 
 class StrategySummary(Base):
@@ -194,6 +204,7 @@ class PositionCurrent(Base):
     idx_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     fwd_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     upl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    fee: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # accrued fee (coin), for payoff
     premium_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     delta: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     gamma: Mapped[float | None] = mapped_column(Numeric, nullable=True)

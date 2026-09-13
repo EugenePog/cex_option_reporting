@@ -27,7 +27,10 @@ from app.db.models_gold import (
     UnderlyingPrice,
 )
 from app.domain.metrics import deal_metrics, equity_metrics
-from app.domain.pricing import black76_price, payoff_intrinsic
+from app.domain.pricing import black76_price, contract_size, payoff_intrinsic
+
+# OKX crypto options settle at 08:00 UTC on the expiry date.
+OKX_SETTLE_UTC = time(8, 0)
 from app.web.deps import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/api", tags=["reports"])
@@ -159,8 +162,11 @@ def equity(subaccount: int | None = None, frm: str | None = None, till: str | No
         eq_rows = s.execute(eq_q.group_by(BalanceTimeseries.captured_at)
                             .order_by(BalanceTimeseries.captured_at)).all()
 
-        pnl_q = select(PnlDaily.date, func.sum(PnlDaily.net_pnl), func.sum(PnlDaily.realized_pnl),
-                       func.sum(PnlDaily.unrealized_pnl), func.sum(PnlDaily.fees)) \
+        # ①a is a USD report → return USD (fee-inclusive net); coin kept for reference/back-compat.
+        pnl_q = select(PnlDaily.date,
+                       func.sum(PnlDaily.net_pnl_usd), func.sum(PnlDaily.realized_pnl_usd),
+                       func.sum(PnlDaily.unrealized_pnl_usd), func.sum(PnlDaily.fees_usd),
+                       func.sum(PnlDaily.net_pnl)) \
             .where(PnlDaily.subaccount_id.in_(subs))
         if fd is not None:
             pnl_q = pnl_q.where(PnlDaily.date >= fd)
@@ -169,7 +175,8 @@ def equity(subaccount: int | None = None, frm: str | None = None, till: str | No
         pnl_rows = s.execute(pnl_q.group_by(PnlDaily.date).order_by(PnlDaily.date)).all()
     equity_series = [{"t": t.isoformat(), "v": _f(v)} for t, v in eq_rows]
     pnl = [{"date": d.isoformat(), "net": _f(n), "realized": _f(r),
-            "unrealized": _f(u), "fees": _f(fee)} for d, n, r, u, fee in pnl_rows]
+            "unrealized": _f(u), "fees": _f(fee), "net_coin": _f(nc)}
+           for d, n, r, u, fee, nc in pnl_rows]
     header = {}
     if equity_series:
         first, last = equity_series[0]["v"], equity_series[-1]["v"]
@@ -287,7 +294,13 @@ def _settlement_price(s, subs, underlying, chosen) -> float | None:
 def payoff(underlying: str | None = None, expiry: str | None = None,
            subaccount: int | None = None, user: CurrentUser = Depends(get_current_user)) -> dict:
     subs = _subs(user, subaccount)
-    today = datetime.now(timezone.utc).date()
+    now = datetime.now(timezone.utc)
+    today = now.date()
+
+    def _expired(exp: date | None) -> bool:
+        """OKX options settle at 08:00 UTC on the expiry date — expired once that moment passed."""
+        return exp is not None and now >= datetime.combine(exp, OKX_SETTLE_UTC, tzinfo=timezone.utc)
+
     with SessionLocal() as s:
         oq = select(PositionCurrent).where(PositionCurrent.subaccount_id.in_(subs),
                                            PositionCurrent.opt_type.isnot(None),
@@ -305,15 +318,19 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
         open_exps = {p.expiry for p in open_all if p.expiry}
         closed_exps = {c.expiry for c in closed_all if c.expiry}
         expiries = sorted(open_exps | closed_exps)
-        chosen = date.fromisoformat(expiry) if expiry else (
-            min(open_exps) if open_exps else (expiries[0] if expiries else None))
+        # Default to the LAST known expiry (expired or active). An expiry past its 08:00 UTC
+        # settlement is treated as expired even if it still lingers in the open snapshot.
+        chosen = date.fromisoformat(expiry) if expiry else (max(expiries) if expiries else None)
 
+        chosen_expired = _expired(chosen)
         open_legs = [p for p in open_all if p.expiry == chosen]
         closed_legs = [c for c in closed_all if c.expiry == chosen]
 
-        # Normalize to (strike, opt_type, signed_size, premium_usd) and set the price marker.
+        # Normalize to (strike, opt_type, signed_size, premium_usd, iv); size scaled by contract
+        # underlying units (ctVal). fees_usd accrues the (negative) fee cost to fold into the P&L.
         norm: list[tuple] = []
-        if open_legs:                                   # OPEN: live book → spot marker (with time)
+        fees_usd = 0.0
+        if not chosen_expired and open_legs:            # OPEN: live book → spot marker (with time)
             mode = "open"
             marker_price = next((_f(p.idx_px) for p in open_legs if p.idx_px), None) \
                 or _f(open_legs[0].strike)
@@ -322,9 +339,11 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
                       "time": marker_at.strftime("%H:%M") if marker_at else None}
             include_t0 = True
             for p in open_legs:
-                norm.append((_f(p.strike), p.opt_type, _f(p.size),
+                cs = contract_size(p.underlying)
+                fees_usd += _f(p.fee) * (_f(p.idx_px) or marker_price)   # fee (coin) → USD
+                norm.append((_f(p.strike), p.opt_type, _f(p.size) * cs,   # pos is signed (+long/−short)
                              _f(p.avg_px) * (_f(p.idx_px) or marker_price), _f(p.iv) or 0.5))
-        elif closed_legs:                               # EXPIRED: closed book → expiration price
+        elif closed_legs:                               # EXPIRED (settled): closed book → expiry price
             mode = "expired"
             marker_price = _settlement_price(s, subs, underlying, chosen) \
                 or (sum(_f(c.strike) for c in closed_legs) / len(closed_legs))
@@ -332,8 +351,21 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
             include_t0 = False
             for c in closed_legs:
                 sign = -1.0 if (c.side or "").lower() == "short" else 1.0
-                norm.append((_f(c.strike), c.opt_type, sign * _f(c.size),
+                cs = contract_size(c.underlying)
+                fees_usd += _f(c.fee) * marker_price
+                norm.append((_f(c.strike), c.opt_type, sign * _f(c.size) * cs,
                              _f(c.entry_px) * marker_price, 0.0))
+        elif chosen_expired and open_legs:              # expired at 08:00 but not yet in deal ledger
+            mode = "expired"
+            marker_price = _settlement_price(s, subs, underlying, chosen) \
+                or (sum(_f(p.strike) for p in open_legs) / len(open_legs))
+            marker = {"value": marker_price, "label": "expiry", "time": None}
+            include_t0 = False
+            for p in open_legs:
+                cs = contract_size(p.underlying)
+                fees_usd += _f(p.fee) * (_f(p.idx_px) or marker_price)
+                norm.append((_f(p.strike), p.opt_type, _f(p.size) * cs,
+                             _f(p.avg_px) * (_f(p.idx_px) or marker_price), 0.0))
         else:
             return {"spot_grid": [], "at_expiry": [], "t0": [], "breakevens": [],
                     "marker": None, "mode": "empty",
@@ -346,13 +378,14 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
         else (marker_price * 0.95, marker_price * 1.05)
     grid = [lo + (hi - lo) * i / 60 for i in range(61)]
 
+    # fees_usd is the (negative) fee cost already paid — fold it in so P&L is net of fees.
     at_expiry, t0 = [], []
     for S in grid:
         at_expiry.append(round(sum(sz * (payoff_intrinsic(S, k, ot) - prem)
-                                   for k, ot, sz, prem, _iv in norm), 2))
+                                   for k, ot, sz, prem, _iv in norm) + fees_usd, 2))
         if include_t0:
             t0.append(round(sum(sz * (black76_price(S, k, t_years, iv, ot) - prem)
-                                for k, ot, sz, prem, iv in norm), 2))
+                                for k, ot, sz, prem, iv in norm) + fees_usd, 2))
     bes = []
     for i in range(1, len(grid)):
         y0, y1 = at_expiry[i - 1], at_expiry[i]

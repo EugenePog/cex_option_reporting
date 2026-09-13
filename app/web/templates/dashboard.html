@@ -175,8 +175,8 @@ async function renderEquity() {
   await Plotly.newPlot("c-pnl", [{
     x: d.pnl.map(p=>p.date), y: d.pnl.map(p=>p.net), type:"bar",
     marker:{color: d.pnl.map(p=>p.net>=0?COL.green:COL.red)},
-    hovertemplate:"%{x}<br>net %{y:$,.0f}<extra></extra>"
-  }], layout({ yaxis:{title:"Net P&L / day"}, xaxis: xa, showlegend:false, margin:{l:64,r:16,t:6,b:30} }), CFG);
+    hovertemplate:"%{x}<br>net %{y:$,.2f}<extra></extra>"
+  }], layout({ yaxis:{title:"Net P&L / day (USD)"}, xaxis: xa, showlegend:false, margin:{l:64,r:16,t:6,b:30} }), CFG);
   if (synced) linkX("c-equity", "c-pnl");
 }
 

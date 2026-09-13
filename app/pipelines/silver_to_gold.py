@@ -87,9 +87,10 @@ def run() -> dict[str, int]:
         s.execute(text("TRUNCATE " + ", ".join(f"gold.{t}" for t in _GOLD_TABLES)
                        + " RESTART IDENTITY"))
 
+        rates = _CoinUsd(s)  # coin→USD conversion for USD-denominated gold columns
         counts["balance_timeseries"] = _build_balance_ts(s)
         counts["asset_balance_timeseries"] = _build_asset_balance_ts(s)
-        counts["asset_pnl_daily"] = _build_asset_pnl_daily(s)
+        counts["asset_pnl_daily"] = _build_asset_pnl_daily(s, rates)
         eod = _eod_equity(s)  # end-of-day USD equity per (subaccount, day) — used by rollups
         counts["position_current"] = _build_position_current(s)
         counts["underlying_price"] = _build_underlying_price(s)
@@ -97,7 +98,7 @@ def run() -> dict[str, int]:
         counts["greeks_by_expiry"] = _build_greeks_by_expiry(s)
         counts["strategy_summary"] = _build_strategy_summary(s, today)
         counts["deal_ledger"] = _build_deal_ledger(s)
-        counts["pnl_daily"] = _build_pnl_daily(s)
+        counts["pnl_daily"] = _build_pnl_daily(s, rates)
         counts["client_pnl_daily"] = _build_client_pnl_daily(s, sub_user, eod)
         counts.update(_build_performance(s, sub_user, today, now, eod))
 
@@ -147,7 +148,53 @@ def _asset_of(underlying: str | None) -> str | None:
     return underlying.split("-")[0] if underlying else None
 
 
-def _build_asset_pnl_daily(s) -> int:
+class _CoinUsd:
+    """coin -> USD conversion per (subaccount, ccy, day).
+
+    Primary rate = usd_value/total at the last balance snapshot of the day (covers every held coin,
+    incl. stablecoins ≈ 1). Fallback = underlying index price (idx_px) for option settlement coins.
+    Missing exact days fall back to the nearest known day for that (subaccount, ccy)."""
+
+    def __init__(self, s):
+        best: dict[tuple, tuple[datetime, float]] = {}  # (sub,ccy,day) -> (captured_at, rate)
+        for b in s.execute(select(BalanceSnapshot)).scalars():
+            tot = _fl(b.total)
+            if b.captured_at is None or tot == 0 or b.usd_value is None:
+                continue
+            k = (b.subaccount_id, b.ccy, b.captured_at.date())
+            if k not in best or b.captured_at > best[k][0]:
+                best[k] = (b.captured_at, _fl(b.usd_value) / tot)
+        self._rate = {k: v[1] for k, v in best.items()}
+        idx: dict[tuple, tuple[datetime, float]] = {}
+        for p in s.execute(select(PositionSnapshot)).scalars():
+            base = _asset_of(p.underlying)
+            if base is None or p.idx_px is None or p.captured_at is None:
+                continue
+            k = (p.subaccount_id, base, p.captured_at.date())
+            if k not in idx or p.captured_at > idx[k][0]:
+                idx[k] = (p.captured_at, _fl(p.idx_px))
+        for k, v in idx.items():
+            self._rate.setdefault(k, v[1])
+        # per (sub,ccy) sorted days for nearest-day fallback
+        self._by_cc: dict[tuple, list[tuple[date, float]]] = defaultdict(list)
+        for (sub, ccy, d), r in self._rate.items():
+            self._by_cc[(sub, ccy)].append((d, r))
+        for v in self._by_cc.values():
+            v.sort()
+
+    def rate(self, sub: int, ccy: str | None, d: date) -> float:
+        if ccy is None:
+            return 1.0
+        r = self._rate.get((sub, ccy, d))
+        if r is not None:
+            return r
+        cand = self._by_cc.get((sub, ccy))
+        if cand:
+            return min(cand, key=lambda t: abs((t[0] - d).days))[1]
+        return 1.0 if ccy.upper().startswith("USD") else 1.0
+
+
+def _build_asset_pnl_daily(s, rates: _CoinUsd) -> int:
     # coin-denominated. OKX realizedPnl already NETS fees (= pnl + fee + funding), so it IS net_pnl;
     # gross realized is derived as net - fees (fee is negative), and fees are shown separately.
     agg: dict[tuple, dict] = defaultdict(lambda: dict(net=0.0, fee=0.0))
@@ -172,9 +219,13 @@ def _build_asset_pnl_daily(s) -> int:
     for (sub_id, ccy, d) in keys:
         a = agg.get((sub_id, ccy, d), {})
         net, fees = a.get("net", 0.0), a.get("fee", 0.0)
+        upl = eod_level.get((sub_id, ccy, d))
+        r = rates.rate(sub_id, ccy, d)
         s.add(AssetPnlDaily(
             subaccount_id=sub_id, ccy=ccy, date=d, realized_pnl=net - fees,
-            unrealized_pnl=eod_level.get((sub_id, ccy, d)), fees=fees, net_pnl=net))
+            unrealized_pnl=upl, fees=fees, net_pnl=net,
+            realized_pnl_usd=(net - fees) * r, unrealized_pnl_usd=(upl * r if upl is not None else None),
+            fees_usd=fees * r, net_pnl_usd=net * r))
     return len(keys)
 
 
@@ -217,8 +268,8 @@ def _build_position_current(s) -> int:
             subaccount_id=p.subaccount_id, strategy_id=p.strategy_id, inst_id=p.inst_id,
             underlying=p.underlying, opt_type=p.opt_type, strike=p.strike, expiry=p.expiry,
             side=p.side, size=p.size, avg_px=p.avg_px, mark_px=p.mark_px, idx_px=p.idx_px,
-            fwd_px=p.fwd_px, upl=p.upl, premium_usd=(p.notional_usd if p.notional_usd is not None
-                                                     else p.opt_val),
+            fwd_px=p.fwd_px, upl=p.upl, fee=p.fee,
+            premium_usd=(p.notional_usd if p.notional_usd is not None else p.opt_val),
             delta=p.delta_bs, gamma=p.gamma_bs, theta=p.theta_bs, vega=p.vega_bs, iv=p.iv,
             captured_at=p.captured_at,
         ))
@@ -296,36 +347,46 @@ def _build_deal_ledger(s) -> int:
     return n
 
 
-def _build_pnl_daily(s) -> int:
+def _build_pnl_daily(s, rates: _CoinUsd) -> int:
     # OKX realizedPnl already NETS fees (= pnl + fee + funding), so it IS net_pnl; gross realized
-    # is derived as net - fees (fee is negative), fees shown separately.
-    agg: dict[tuple, dict] = defaultdict(lambda: dict(net=0.0, fee=0.0))
+    # is derived as net - fees (fee is negative), fees shown separately. USD amounts convert each
+    # closed position's coin PnL by that coin's rate at close (a strategy may mix settlement coins).
+    agg: dict[tuple, dict] = defaultdict(
+        lambda: dict(net=0.0, fee=0.0, net_usd=0.0, fee_usd=0.0))
     for cp in s.execute(select(ClosedPosition)).scalars():
         if not cp.closed_at:
             continue
-        k = (cp.subaccount_id, cp.strategy_id, cp.closed_at.date())
+        d = cp.closed_at.date()
+        k = (cp.subaccount_id, cp.strategy_id, d)
+        r = rates.rate(cp.subaccount_id, cp.ccy, d)
         agg[k]["net"] += _fl(cp.realized_pnl)   # OKX net (fees included)
         agg[k]["fee"] += _fl(cp.fee)
+        agg[k]["net_usd"] += _fl(cp.realized_pnl) * r
+        agg[k]["fee_usd"] += _fl(cp.fee) * r
 
-    # end-of-day unrealized level per (subaccount, strategy, day) from position snapshots
-    eod: dict[tuple, dict[tuple, float]] = defaultdict(dict)  # (sub,strat,day) -> {captured_at: upl}
+    # end-of-day unrealized level per (subaccount, strategy, day) from position snapshots (coin+USD)
+    eod: dict[tuple, dict[datetime, tuple[float, float]]] = defaultdict(dict)
     for p in s.execute(select(PositionSnapshot)).scalars():
         if p.captured_at is None:
             continue
         d = p.captured_at.date()
         k = (p.subaccount_id, p.strategy_id, d)
-        eod[k][p.captured_at] = eod[k].get(p.captured_at, 0.0) + _fl(p.upl)
+        r = rates.rate(p.subaccount_id, _asset_of(p.underlying), d)
+        cur = eod[k].get(p.captured_at, (0.0, 0.0))
+        eod[k][p.captured_at] = (cur[0] + _fl(p.upl), cur[1] + _fl(p.upl) * r)
     eod_level = {k: v[max(v)] for k, v in eod.items()}  # upl at the latest snapshot of the day
 
     keys = set(agg) | set(eod_level)
     for (sub_id, strat_id, d) in keys:
         a = agg.get((sub_id, strat_id, d), {})
-        net = a.get("net", 0.0)
-        fees = a.get("fee", 0.0)
+        net, fees = a.get("net", 0.0), a.get("fee", 0.0)
+        net_usd, fees_usd = a.get("net_usd", 0.0), a.get("fee_usd", 0.0)
+        upl_coin, upl_usd = eod_level.get((sub_id, strat_id, d), (None, None))
         s.add(PnlDaily(
             subaccount_id=sub_id, strategy_id=strat_id, date=d,
-            realized_pnl=net - fees, unrealized_pnl=eod_level.get((sub_id, strat_id, d)),
-            fees=fees, net_pnl=net,
+            realized_pnl=net - fees, unrealized_pnl=upl_coin, fees=fees, net_pnl=net,
+            realized_pnl_usd=net_usd - fees_usd, unrealized_pnl_usd=upl_usd,
+            fees_usd=fees_usd, net_pnl_usd=net_usd,
         ))
     return len(keys)
 

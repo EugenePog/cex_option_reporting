@@ -24,6 +24,18 @@ from config.settings import get_settings
 _HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(_HERE / "templates"))
 
+
+def _asset_version() -> str:
+    """Cache-busting token: newest mtime across static files. Changes → browsers refetch."""
+    static = _HERE / "static"
+    try:
+        return str(int(max(f.stat().st_mtime for f in static.rglob("*") if f.is_file())))
+    except ValueError:
+        return "0"
+
+
+templates.env.globals["asset_ver"] = _asset_version()
+
 app = FastAPI(title="CEX Option Reporting")
 app.add_middleware(SessionMiddleware, secret_key=get_settings().app_secret_key or "dev-insecure-key")
 app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")

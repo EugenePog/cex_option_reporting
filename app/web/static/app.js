@@ -30,6 +30,10 @@ function sharedRange(...arrays) {
   xs.sort();
   return [xs[0], xs[xs.length - 1]];
 }
+// Add n days to a 'YYYY-MM-DD' string (UTC, avoids TZ shift).
+function addDaysStr(ymd, n){ const d=new Date(ymd+"T00:00:00Z"); d.setUTCDate(d.getUTCDate()+n); return d.toISOString().slice(0,10); }
+// Explicit axis range from a reporting period (till is inclusive → extend one day). Null if open-ended.
+function periodRange(frm, till){ return (frm && till) ? [frm, addDaysStr(till, 1)] : null; }
 // Link the x-axes of two stacked Plotly charts: pan/zoom one → the other follows.
 // Re-called after every newPlot (Plotly purges handlers on re-plot, so no duplicates).
 function linkX(topId, botId) {

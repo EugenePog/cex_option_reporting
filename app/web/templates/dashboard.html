@@ -15,6 +15,19 @@
     <h2>① Equity curve &amp; daily net P&amp;L
       <label class="sync-toggle"><input type="checkbox" id="sync-1" checked> Sync timelines</label></h2>
     <p class="hint" id="equity-header">Account value over time · realized + unrealized per day.</p>
+    <div class="rpbar">
+      <label>Reporting period</label>
+      <select id="rp-1">
+        <option value="all">All</option>
+        <option value="mtd">Month to date</option>
+        <option value="prevm">Previous month</option>
+        <option value="1m" selected>Last 1 month</option>
+        <option value="1w">Last 1 week</option>
+        <option value="manual">Manual input</option>
+      </select>
+      <label>From</label><input type="date" id="from-1">
+      <label>Till</label><input type="date" id="till-1">
+    </div>
     <div id="c-equity" class="chart"></div>
     <div id="c-pnl" class="chart" style="height:200px"></div>
   </div>
@@ -27,22 +40,38 @@
     <p class="hint">Balance &amp; P&amp;L for a single asset, denominated in that asset.
       <select id="f-asset" style="min-width:110px;margin-left:8px"></select>
       <span id="asset-stat" style="margin-left:10px;font-weight:800"></span></p>
+    <div class="rpbar">
+      <label>Reporting period</label>
+      <select id="rp-1b">
+        <option value="all">All</option>
+        <option value="mtd">Month to date</option>
+        <option value="prevm">Previous month</option>
+        <option value="1m" selected>Last 1 month</option>
+        <option value="1w">Last 1 week</option>
+        <option value="manual">Manual input</option>
+      </select>
+      <label>From</label><input type="date" id="from-1b">
+      <label>Till</label><input type="date" id="till-1b">
+    </div>
     <div id="c-asset-equity" class="chart"></div>
     <div id="c-asset-pnl" class="chart" style="height:200px"></div>
   </div>
 </div>
 
+<div class="grid" style="margin-bottom:18px">
+  <div class="card"><h2>② Payoff / risk profile</h2>
+    <p class="hint">Combined P&amp;L vs price — at expiry &amp; today (T+0). Price axis = ±5% of strike.
+      <select id="f-expiry" style="min-width:120px;margin-left:8px"></select></p>
+    <div id="c-payoff" class="chart" style="height:520px"></div></div>
+</div>
+
 <div class="grid cols-2">
-  <div class="card"><h2>② Strike × expiry position map</h2>
+  <div class="card"><h2>③ Strike × expiry position map</h2>
     <p class="hint">Net contracts — blue long / red short. Dashed line = spot.</p>
     <div id="c-map" class="chart tall"></div></div>
-  <div class="card"><h2>③ Greeks term structure</h2>
+  <div class="card"><h2>④ Greeks term structure</h2>
     <p class="hint">Net vega ($/vol pt) and net theta ($/day) by expiry.</p>
     <div id="c-greeks" class="chart tall"></div></div>
-  <div class="card"><h2>④ Payoff / risk profile</h2>
-    <p class="hint">Combined P&amp;L vs price — at expiry &amp; today (T+0).
-      <select id="f-expiry" style="min-width:120px;margin-left:8px"></select></p>
-    <div id="c-payoff" class="chart tall"></div></div>
   <div class="card"><h2>⑤ Maturity ladder</h2>
     <p class="hint">Premium at risk by expiry — calls vs puts.</p>
     <div id="c-ladder" class="chart tall"></div></div>
@@ -63,14 +92,38 @@ async function boot() {
   document.getElementById("f-expiry").onchange = () => renderPayoff();
   document.getElementById("sync-1").onchange = () => renderEquity();
   document.getElementById("sync-1b").onchange = () => renderAssetEquity();
+  setupPeriod("1", renderEquity);       // sets default (1m) from/till before first render
+  setupPeriod("1b", renderAssetEquity);
   renderAll();
 }
 function renderAll(){ renderEquity(); renderAssetEquity(); renderBook(); }
 
+// --- reporting-period control (preset combobox + from/till calendars) ---
+function ymd(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function computePeriod(preset){
+  const now = new Date(), today = ymd(now);
+  if (preset==="all")  return {from:"", till:""};
+  if (preset==="mtd")  return {from: ymd(new Date(now.getFullYear(), now.getMonth(), 1)), till: today};
+  if (preset==="prevm"){ const f=new Date(now.getFullYear(),now.getMonth()-1,1),
+                               l=new Date(now.getFullYear(),now.getMonth(),0); return {from:ymd(f),till:ymd(l)}; }
+  if (preset==="1m"){ const f=new Date(now); f.setMonth(f.getMonth()-1); return {from:ymd(f),till:today}; }
+  if (preset==="1w"){ const f=new Date(now); f.setDate(f.getDate()-7);   return {from:ymd(f),till:today}; }
+  return null;  // manual → leave inputs as-is
+}
+function setupPeriod(sfx, render){
+  const rp=document.getElementById("rp-"+sfx), from=document.getElementById("from-"+sfx), till=document.getElementById("till-"+sfx);
+  const p=computePeriod(rp.value); if(p){ from.value=p.from; till.value=p.till; }  // default 1m
+  rp.onchange = () => { const q=computePeriod(rp.value); if(q){ from.value=q.from; till.value=q.till; } render(); };
+  from.onchange = till.onchange = () => { rp.value="manual"; render(); };
+}
+const periodParams = (sfx) => ({ frm: document.getElementById("from-"+sfx).value,
+                                 till: document.getElementById("till-"+sfx).value });
+
 const coin = (v,ccy) => (v<0?"-":"") + Math.abs(v).toLocaleString(undefined,{maximumFractionDigits:6}) + " " + (ccy||"");
 async function renderAssetEquity(){
   const sel = document.getElementById("f-asset");
-  const d = await api("/asset-equity", { ccy: sel.value, subaccount: state.subaccount }); if(!d) return;
+  const pp = periodParams("1b");
+  const d = await api("/asset-equity", { ccy: sel.value, subaccount: state.subaccount, ...pp }); if(!d) return;
   if (d.ccy && !sel.value) sel.value = d.ccy;
   const ccy = d.ccy || "";
   const hx = d.header || {}, stat = document.getElementById("asset-stat");
@@ -78,7 +131,8 @@ async function renderAssetEquity(){
     ? `<span class="${hx.delta>=0?'pos':'neg'}">${coin(hx.delta,ccy)} since ${hx.since} · ${pct(hx.pct)}</span>` : "";
   const xs = d.balance.map(p=>p.t), ys = d.balance.map(p=>p.v);
   const synced = document.getElementById("sync-1b").checked;
-  const rng = synced ? sharedRange(xs, d.pnl.map(p=>p.date)) : null;
+  let rng = periodRange(pp.frm, pp.till);
+  if (!rng && synced) rng = sharedRange(xs, d.pnl.map(p=>p.date));
   const xa = rng ? {range: rng} : {};
   await Plotly.newPlot("c-asset-equity", [{
     x:xs, y:ys, type:"scatter", mode:"lines", fill:"tozeroy",
@@ -98,7 +152,8 @@ async function renderAssetEquity(){
 function renderBook(){ renderMap(); renderGreeks(); renderLadder(); renderPayoff(true); }
 
 async function renderEquity() {
-  const d = await api("/equity", { subaccount: state.subaccount }); if (!d) return;
+  const pp = periodParams("1");
+  const d = await api("/equity", { subaccount: state.subaccount, ...pp }); if (!d) return;
   const hx = d.header || {};
   if (hx.delta != null) {
     const cls = hx.delta>=0?"pos":"neg";
@@ -107,7 +162,9 @@ async function renderEquity() {
   }
   const xs = d.equity.map(p=>p.t), ys = d.equity.map(p=>p.v);
   const synced = document.getElementById("sync-1").checked;
-  const rng = synced ? sharedRange(xs, d.pnl.map(p=>p.date)) : null;
+  // period window drives the axis; else union of the two series when synced; else autorange
+  let rng = periodRange(pp.frm, pp.till);
+  if (!rng && synced) rng = sharedRange(xs, d.pnl.map(p=>p.date));
   const xa = rng ? {range: rng} : {};
   await Plotly.newPlot("c-equity", [{
     x: xs, y: ys, type:"scatter", mode:"lines", fill:"tozeroy",

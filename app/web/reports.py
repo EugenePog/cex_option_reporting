@@ -8,7 +8,7 @@ responds live to filters (the precomputed perf tables are used for fixed-period 
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
@@ -40,6 +40,22 @@ def _subs(user: CurrentUser, subaccount: int | None) -> list[int]:
     if subaccount is not None and subaccount in user.subaccount_ids:
         return [subaccount]
     return user.subaccount_ids
+
+
+def _date_bounds(frm: str | None, till: str | None):
+    """Parse 'YYYY-MM-DD' from/till into (from_date, till_date, from_dt@00:00, till_dt@23:59:59) UTC.
+
+    'from' includes the whole day from 00:00; 'till' includes the whole day up to 23:59:59.
+    """
+    def _d(x):
+        try:
+            return date.fromisoformat(x) if x else None
+        except ValueError:
+            return None
+    fd, td = _d(frm), _d(till)
+    lo = datetime.combine(fd, time.min, tzinfo=timezone.utc) if fd else None
+    hi = datetime.combine(td, time.max, tzinfo=timezone.utc) if td else None
+    return fd, td, lo, hi
 
 
 def _period_start(period: str, today: date) -> date | None:
@@ -82,8 +98,10 @@ def filters(user: CurrentUser = Depends(get_current_user)) -> dict:
 # ①b Per-asset (in-kind) equity & daily net P&L --------------------------- #
 @router.get("/asset-equity")
 def asset_equity(ccy: str | None = None, subaccount: int | None = None,
+                 frm: str | None = None, till: str | None = None,
                  user: CurrentUser = Depends(get_current_user)) -> dict:
     subs = _subs(user, subaccount)
+    fd, td, lo, hi = _date_bounds(frm, till)
     with SessionLocal() as s:
         if not ccy:  # default to the asset with the largest current balance
             latest = s.execute(
@@ -93,18 +111,25 @@ def asset_equity(ccy: str | None = None, subaccount: int | None = None,
                 .order_by(func.max(AssetBalanceTimeseries.amount).desc())
             ).first()
             ccy = latest[0] if latest else None
-        bal_rows = s.execute(
-            select(AssetBalanceTimeseries.captured_at, func.sum(AssetBalanceTimeseries.amount))
-            .where(AssetBalanceTimeseries.subaccount_id.in_(subs), AssetBalanceTimeseries.ccy == ccy)
-            .group_by(AssetBalanceTimeseries.captured_at).order_by(AssetBalanceTimeseries.captured_at)
-        ).all() if ccy else []
-        pnl_rows = s.execute(
-            select(AssetPnlDaily.date, func.sum(AssetPnlDaily.net_pnl),
-                   func.sum(AssetPnlDaily.realized_pnl), func.sum(AssetPnlDaily.unrealized_pnl),
-                   func.sum(AssetPnlDaily.fees))
-            .where(AssetPnlDaily.subaccount_id.in_(subs), AssetPnlDaily.ccy == ccy)
-            .group_by(AssetPnlDaily.date).order_by(AssetPnlDaily.date)
-        ).all() if ccy else []
+        bal_rows, pnl_rows = [], []
+        if ccy:
+            bq = select(AssetBalanceTimeseries.captured_at, func.sum(AssetBalanceTimeseries.amount)) \
+                .where(AssetBalanceTimeseries.subaccount_id.in_(subs), AssetBalanceTimeseries.ccy == ccy)
+            if lo is not None:
+                bq = bq.where(AssetBalanceTimeseries.captured_at >= lo)
+            if hi is not None:
+                bq = bq.where(AssetBalanceTimeseries.captured_at <= hi)
+            bal_rows = s.execute(bq.group_by(AssetBalanceTimeseries.captured_at)
+                                 .order_by(AssetBalanceTimeseries.captured_at)).all()
+            pq = select(AssetPnlDaily.date, func.sum(AssetPnlDaily.net_pnl),
+                        func.sum(AssetPnlDaily.realized_pnl), func.sum(AssetPnlDaily.unrealized_pnl),
+                        func.sum(AssetPnlDaily.fees)) \
+                .where(AssetPnlDaily.subaccount_id.in_(subs), AssetPnlDaily.ccy == ccy)
+            if fd is not None:
+                pq = pq.where(AssetPnlDaily.date >= fd)
+            if td is not None:
+                pq = pq.where(AssetPnlDaily.date <= td)
+            pnl_rows = s.execute(pq.group_by(AssetPnlDaily.date).order_by(AssetPnlDaily.date)).all()
     balance = [{"t": t.isoformat(), "v": _f(v)} for t, v in bal_rows]
     pnl = [{"date": d.isoformat(), "net": _f(n), "realized": _f(r), "unrealized": _f(u),
             "fees": _f(fee)} for d, n, r, u, fee in pnl_rows]
@@ -118,20 +143,28 @@ def asset_equity(ccy: str | None = None, subaccount: int | None = None,
 
 # ① Equity curve & daily net P&L ------------------------------------------- #
 @router.get("/equity")
-def equity(subaccount: int | None = None, user: CurrentUser = Depends(get_current_user)) -> dict:
+def equity(subaccount: int | None = None, frm: str | None = None, till: str | None = None,
+           user: CurrentUser = Depends(get_current_user)) -> dict:
     subs = _subs(user, subaccount)
+    fd, td, lo, hi = _date_bounds(frm, till)
     with SessionLocal() as s:
-        eq_rows = s.execute(
-            select(BalanceTimeseries.captured_at, func.sum(BalanceTimeseries.equity_usd))
+        eq_q = select(BalanceTimeseries.captured_at, func.sum(BalanceTimeseries.equity_usd)) \
             .where(BalanceTimeseries.subaccount_id.in_(subs))
-            .group_by(BalanceTimeseries.captured_at).order_by(BalanceTimeseries.captured_at)
-        ).all()
-        pnl_rows = s.execute(
-            select(PnlDaily.date, func.sum(PnlDaily.net_pnl), func.sum(PnlDaily.realized_pnl),
-                   func.sum(PnlDaily.unrealized_pnl), func.sum(PnlDaily.fees))
+        if lo is not None:
+            eq_q = eq_q.where(BalanceTimeseries.captured_at >= lo)
+        if hi is not None:
+            eq_q = eq_q.where(BalanceTimeseries.captured_at <= hi)
+        eq_rows = s.execute(eq_q.group_by(BalanceTimeseries.captured_at)
+                            .order_by(BalanceTimeseries.captured_at)).all()
+
+        pnl_q = select(PnlDaily.date, func.sum(PnlDaily.net_pnl), func.sum(PnlDaily.realized_pnl),
+                       func.sum(PnlDaily.unrealized_pnl), func.sum(PnlDaily.fees)) \
             .where(PnlDaily.subaccount_id.in_(subs))
-            .group_by(PnlDaily.date).order_by(PnlDaily.date)
-        ).all()
+        if fd is not None:
+            pnl_q = pnl_q.where(PnlDaily.date >= fd)
+        if td is not None:
+            pnl_q = pnl_q.where(PnlDaily.date <= td)
+        pnl_rows = s.execute(pnl_q.group_by(PnlDaily.date).order_by(PnlDaily.date)).all()
     equity_series = [{"t": t.isoformat(), "v": _f(v)} for t, v in eq_rows]
     pnl = [{"date": d.isoformat(), "net": _f(n), "realized": _f(r),
             "unrealized": _f(u), "fees": _f(fee)} for d, n, r, u, fee in pnl_rows]
@@ -251,7 +284,9 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
     spot = next((_f(p.idx_px) for p in legs if p.idx_px), None) or _f(legs[0].strike)
     today = datetime.now(timezone.utc).date()
     t_years = max((chosen - today).days, 0) / 365.0
-    lo, hi = spot * 0.8, spot * 1.2
+    # price axis spans ±5% of the legs' strikes (covers every kink with margin)
+    strikes = [_f(p.strike) for p in legs if p.strike]
+    lo, hi = (min(strikes) * 0.95, max(strikes) * 1.05) if strikes else (spot * 0.95, spot * 1.05)
     grid = [lo + (hi - lo) * i / 60 for i in range(61)]
 
     def premium_usd(p) -> float:  # entry premium per contract in USD (avg_px in coin × spot)

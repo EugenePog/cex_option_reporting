@@ -2,11 +2,11 @@
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{% block title %}CEX Option Reporting{% endblock %}</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/app.css?v={{ asset_ver }}">
 <!-- jsDelivr serves any real npm version reliably; cdnjs fallback if it's blocked. -->
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
   onerror="this.onerror=null;document.write('<scr'+'ipt src=\'https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.2/plotly.min.js\'></scr'+'ipt>')"></script>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v={{ asset_ver }}"></script>
 </head><body>
 <div id="jserr" style="display:none;background:#2a1113;border-bottom:1px solid #5b1e22;color:#f7a6a6;padding:8px 22px;font-size:13px"></div>
 <script>

@@ -60,8 +60,9 @@
 
 <div class="grid" style="margin-bottom:18px">
   <div class="card"><h2>② Payoff / risk profile</h2>
-    <p class="hint">Combined P&amp;L vs price — at expiry &amp; today (T+0). Price axis = ±5% of strike.
-      <select id="f-expiry" style="min-width:120px;margin-left:8px"></select></p>
+    <p class="hint">Combined P&amp;L vs price on expiration date
+      <input type="date" id="f-expiry" list="expiry-list" style="min-width:auto;width:150px;margin-left:8px">
+      <datalist id="expiry-list"></datalist>
     <div id="c-payoff" class="chart" style="height:520px"></div></div>
 </div>
 
@@ -228,26 +229,41 @@ async function renderLadder() {
     margin:{l:80,r:16,t:10,b:36} }), CFG);
 }
 
-let payoffExpiriesLoaded = false;
 async function renderPayoff(resetExpiry) {
-  const exSel = document.getElementById("f-expiry");
+  const exInput = document.getElementById("f-expiry");
   const d = await api("/payoff", { underlying: state.underlying, subaccount: state.subaccount,
-                                   expiry: resetExpiry ? "" : exSel.value }); if (!d) return;
-  fillSelect(exSel, d.expiries); if (d.expiry) exSel.value = d.expiry;
+                                   expiry: resetExpiry ? "" : exInput.value }); if (!d) return;
+  // Default to the nearest expiry, but DON'T set min/max — clamping drops digits while typing.
+  // Available expiries are offered via a datalist instead (see #expiry-list).
+  if ((resetExpiry || !exInput.value) && d.expiry) exInput.value = d.expiry;
+  const dl = document.getElementById("expiry-list");
+  if (dl && d.expiries) dl.innerHTML = d.expiries.map(e=>`<option value="${e}">`).join("");
   const g = d.spot_grid, ae = d.at_expiry;
   const pos = ae.map(v=>v>0?v:0), neg = ae.map(v=>v<0?v:0);
   const shapes = [], ann = [];
-  if (d.spot!=null){ shapes.push({type:"line",x0:d.spot,x1:d.spot,yref:"paper",y0:0,y1:1,line:{color:"#cfd6e0",width:1,dash:"dot"}});
-    ann.push({x:d.spot,yref:"paper",y:1,text:"spot",showarrow:false,font:{color:"#cfd6e0",size:11},yanchor:"bottom"}); }
+  const m = d.marker;
+  if (m && m.value!=null){
+    // OPEN -> "spot (14:00)";  EXPIRED -> "expiry $77.5k" (settlement price)
+    const txt = m.label==="spot"
+      ? "spot" + (m.time ? " ("+m.time+")" : "")
+      : "expiry $"+(m.value/1000).toFixed(1)+"k";
+    shapes.push({type:"line",x0:m.value,x1:m.value,yref:"paper",y0:0,y1:1,line:{color:"#cfd6e0",width:1,dash:"dot"}});
+    ann.push({x:m.value,yref:"paper",y:1,text:txt,showarrow:false,font:{color:"#cfd6e0",size:11},yanchor:"bottom"});
+  }
   (d.breakevens||[]).forEach(b=>{ shapes.push({type:"line",x0:b,x1:b,yref:"paper",y0:0,y1:1,line:{color:"#5a6472",width:1,dash:"dot"}});
     ann.push({x:b,yref:"paper",y:0.06,text:"BE $"+(b/1000).toFixed(1)+"k",showarrow:false,font:{color:"#8b93a1",size:10}}); });
-  Plotly.newPlot("c-payoff", [
+  const expiredNote = d.mode==="expired";
+  const traces = [
     {x:g,y:pos,type:"scatter",mode:"lines",line:{width:0},fill:"tozeroy",fillcolor:"rgba(34,197,94,0.18)",hoverinfo:"skip",showlegend:false},
     {x:g,y:neg,type:"scatter",mode:"lines",line:{width:0},fill:"tozeroy",fillcolor:"rgba(239,68,68,0.16)",hoverinfo:"skip",showlegend:false},
-    {x:g,y:ae,type:"scatter",mode:"lines",name:"P&L at expiry",line:{color:COL.blue,width:2.5}},
-    {x:g,y:d.t0,type:"scatter",mode:"lines",name:"P&L today (T+0)",line:{color:COL.orange,width:2,dash:"dash"}},
-  ], layout({ xaxis:{title:"Underlying price"}, yaxis:{title:"Strategy P&L (USD)"},
-    shapes, annotations:ann, margin:{l:64,r:16,t:10,b:36} }), CFG);
+    {x:g,y:ae,type:"scatter",mode:"lines",name: expiredNote ? "Realized P&L at expiry" : "P&L at expiry",line:{color:COL.blue,width:2.5}},
+  ];
+  if (!expiredNote && d.t0 && d.t0.length)  // T+0 reprice only meaningful for still-open legs
+    traces.push({x:g,y:d.t0,type:"scatter",mode:"lines",name:"P&L today (T+0)",line:{color:COL.orange,width:2,dash:"dash"}});
+  if (expiredNote)
+    ann.push({xref:"paper",x:0.5,yref:"paper",y:1.06,text:"expired "+(d.expiry||""),showarrow:false,font:{color:"#8b93a1",size:11}});
+  Plotly.newPlot("c-payoff", traces, layout({ xaxis:{title:"Underlying price"},
+    yaxis:{title:"Strategy P&L (USD)"}, shapes, annotations:ann, margin:{l:64,r:16,t:10,b:36} }), CFG);
 }
 boot();
 </script>

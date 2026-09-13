@@ -32,6 +32,7 @@ from app.db.models_gold import (
     StrategyPerformance,
     StrategySummary,
     SymbolPerformance,
+    UnderlyingPrice,
 )
 from app.db.models_silver import (
     BalanceSnapshot,
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 _GOLD_TABLES = [  # truncated in this order at the start of each rebuild
     "balance_timeseries", "asset_balance_timeseries", "pnl_daily", "asset_pnl_daily",
-    "strategy_summary", "deal_ledger", "position_current",
+    "strategy_summary", "deal_ledger", "position_current", "underlying_price",
     "greeks_by_expiry", "client_pnl_daily", "client_performance", "strategy_performance",
     "symbol_performance",
 ]
@@ -89,6 +90,7 @@ def run() -> dict[str, int]:
         counts["asset_pnl_daily"] = _build_asset_pnl_daily(s)
         eod = _eod_equity(s)  # end-of-day USD equity per (subaccount, day) — used by rollups
         counts["position_current"] = _build_position_current(s)
+        counts["underlying_price"] = _build_underlying_price(s)
         counts["greeks_by_expiry"] = _build_greeks_by_expiry(s)
         counts["strategy_summary"] = _build_strategy_summary(s, today)
         counts["deal_ledger"] = _build_deal_ledger(s)
@@ -170,6 +172,22 @@ def _build_asset_pnl_daily(s) -> int:
             subaccount_id=sub_id, ccy=ccy, date=d, realized_pnl=realized,
             unrealized_pnl=eod_level.get((sub_id, ccy, d)), fees=fees, net_pnl=realized - fees))
     return len(keys)
+
+
+def _build_underlying_price(s) -> int:
+    # spot/forward per (subaccount, underlying, captured_at) from position snapshots
+    rows = s.execute(
+        select(PositionSnapshot.subaccount_id, PositionSnapshot.underlying,
+               PositionSnapshot.captured_at, func.max(PositionSnapshot.idx_px),
+               func.max(PositionSnapshot.fwd_px))
+        .where(PositionSnapshot.underlying.isnot(None), PositionSnapshot.idx_px.isnot(None))
+        .group_by(PositionSnapshot.subaccount_id, PositionSnapshot.underlying,
+                  PositionSnapshot.captured_at)
+    ).all()
+    for sub_id, uly, cap, idx, fwd in rows:
+        s.add(UnderlyingPrice(subaccount_id=sub_id, underlying=uly, captured_at=cap,
+                              idx_px=idx, fwd_px=fwd))
+    return len(rows)
 
 
 def _build_position_current(s) -> int:

@@ -23,6 +23,7 @@ from app.db.models_gold import (
     GreeksByExpiry,
     PnlDaily,
     PositionCurrent,
+    UnderlyingPrice,
 )
 from app.domain.metrics import deal_metrics, equity_metrics
 from app.domain.pricing import black76_price, payoff_intrinsic
@@ -257,49 +258,90 @@ def ladder(underlying: str | None = None, subaccount: int | None = None,
             "puts": [round(puts.get(e, 0), 2) for e in expiries]}
 
 
-# ④ Payoff / risk profile -------------------------------------------------- #
+# ② Payoff / risk profile -------------------------------------------------- #
+def _settlement_price(s, subs, underlying, chosen) -> float | None:
+    """Underlying price at expiry ≈ idx_px of the latest gold.underlying_price on/before that day."""
+    hi = datetime.combine(chosen, time.max, tzinfo=timezone.utc)
+    q = (select(UnderlyingPrice.idx_px)
+         .where(UnderlyingPrice.subaccount_id.in_(subs), UnderlyingPrice.idx_px.isnot(None),
+                UnderlyingPrice.captured_at <= hi)
+         .order_by(UnderlyingPrice.captured_at.desc()).limit(1))
+    if underlying:
+        q = q.where(UnderlyingPrice.underlying == underlying)
+    row = s.execute(q).first()
+    return _f(row[0]) if row else None
+
+
 @router.get("/payoff")
 def payoff(underlying: str | None = None, expiry: str | None = None,
            subaccount: int | None = None, user: CurrentUser = Depends(get_current_user)) -> dict:
     subs = _subs(user, subaccount)
-    with SessionLocal() as s:
-        q = select(PositionCurrent).where(PositionCurrent.subaccount_id.in_(subs),
-                                          PositionCurrent.opt_type.isnot(None),
-                                          PositionCurrent.strike.isnot(None))
-        if underlying:
-            q = q.where(PositionCurrent.underlying == underlying)
-        legs = s.execute(q).scalars().all()
-    # pick an expiry (nearest) if not specified
-    exps = sorted({p.expiry for p in legs if p.expiry})
-    chosen = None
-    if expiry:
-        chosen = date.fromisoformat(expiry)
-    elif exps:
-        chosen = exps[0]
-    legs = [p for p in legs if p.expiry == chosen]
-    if not legs:
-        return {"spot_grid": [], "at_expiry": [], "t0": [], "breakevens": [],
-                "spot": None, "expiry": chosen.isoformat() if chosen else None, "expiries": [e.isoformat() for e in exps]}
-
-    spot = next((_f(p.idx_px) for p in legs if p.idx_px), None) or _f(legs[0].strike)
     today = datetime.now(timezone.utc).date()
-    t_years = max((chosen - today).days, 0) / 365.0
-    # price axis spans ±5% of the legs' strikes (covers every kink with margin)
-    strikes = [_f(p.strike) for p in legs if p.strike]
-    lo, hi = (min(strikes) * 0.95, max(strikes) * 1.05) if strikes else (spot * 0.95, spot * 1.05)
-    grid = [lo + (hi - lo) * i / 60 for i in range(61)]
+    with SessionLocal() as s:
+        oq = select(PositionCurrent).where(PositionCurrent.subaccount_id.in_(subs),
+                                           PositionCurrent.opt_type.isnot(None),
+                                           PositionCurrent.strike.isnot(None))
+        cq = select(DealLedger).where(DealLedger.subaccount_id.in_(subs),
+                                      DealLedger.opt_type.isnot(None),
+                                      DealLedger.strike.isnot(None),
+                                      DealLedger.expiry.isnot(None))
+        if underlying:
+            oq = oq.where(PositionCurrent.underlying == underlying)
+            cq = cq.where(DealLedger.underlying == underlying)
+        open_all = s.execute(oq).scalars().all()
+        closed_all = s.execute(cq).scalars().all()
 
-    def premium_usd(p) -> float:  # entry premium per contract in USD (avg_px in coin × spot)
-        return _f(p.avg_px) * (_f(p.idx_px) or spot)
+        open_exps = {p.expiry for p in open_all if p.expiry}
+        closed_exps = {c.expiry for c in closed_all if c.expiry}
+        expiries = sorted(open_exps | closed_exps)
+        chosen = date.fromisoformat(expiry) if expiry else (
+            min(open_exps) if open_exps else (expiries[0] if expiries else None))
+
+        open_legs = [p for p in open_all if p.expiry == chosen]
+        closed_legs = [c for c in closed_all if c.expiry == chosen]
+
+        # Normalize to (strike, opt_type, signed_size, premium_usd) and set the price marker.
+        norm: list[tuple] = []
+        if open_legs:                                   # OPEN: live book → spot marker (with time)
+            mode = "open"
+            marker_price = next((_f(p.idx_px) for p in open_legs if p.idx_px), None) \
+                or _f(open_legs[0].strike)
+            marker_at = next((p.captured_at for p in open_legs if p.idx_px and p.captured_at), None)
+            marker = {"value": marker_price, "label": "spot",
+                      "time": marker_at.strftime("%H:%M") if marker_at else None}
+            include_t0 = True
+            for p in open_legs:
+                norm.append((_f(p.strike), p.opt_type, _f(p.size),
+                             _f(p.avg_px) * (_f(p.idx_px) or marker_price), _f(p.iv) or 0.5))
+        elif closed_legs:                               # EXPIRED: closed book → expiration price
+            mode = "expired"
+            marker_price = _settlement_price(s, subs, underlying, chosen) \
+                or (sum(_f(c.strike) for c in closed_legs) / len(closed_legs))
+            marker = {"value": marker_price, "label": "expiry", "time": None}
+            include_t0 = False
+            for c in closed_legs:
+                sign = -1.0 if (c.side or "").lower() == "short" else 1.0
+                norm.append((_f(c.strike), c.opt_type, sign * _f(c.size),
+                             _f(c.entry_px) * marker_price, 0.0))
+        else:
+            return {"spot_grid": [], "at_expiry": [], "t0": [], "breakevens": [],
+                    "marker": None, "mode": "empty",
+                    "expiry": chosen.isoformat() if chosen else None,
+                    "expiries": [e.isoformat() for e in expiries]}
+
+    t_years = max((chosen - today).days, 0) / 365.0
+    strikes = [k for k, *_ in norm if k]
+    lo, hi = (min(strikes) * 0.95, max(strikes) * 1.05) if strikes \
+        else (marker_price * 0.95, marker_price * 1.05)
+    grid = [lo + (hi - lo) * i / 60 for i in range(61)]
 
     at_expiry, t0 = [], []
     for S in grid:
-        ae = sum(_f(p.size) * (payoff_intrinsic(S, _f(p.strike), p.opt_type) - premium_usd(p))
-                 for p in legs)
-        tv = sum(_f(p.size) * (black76_price(S, _f(p.strike), t_years, _f(p.iv) or 0.5, p.opt_type)
-                               - premium_usd(p)) for p in legs)
-        at_expiry.append(round(ae, 2)); t0.append(round(tv, 2))
-    # breakevens = sign changes of the at-expiry curve (linear interpolation)
+        at_expiry.append(round(sum(sz * (payoff_intrinsic(S, k, ot) - prem)
+                                   for k, ot, sz, prem, _iv in norm), 2))
+        if include_t0:
+            t0.append(round(sum(sz * (black76_price(S, k, t_years, iv, ot) - prem)
+                                for k, ot, sz, prem, iv in norm), 2))
     bes = []
     for i in range(1, len(grid)):
         y0, y1 = at_expiry[i - 1], at_expiry[i]
@@ -307,9 +349,9 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
             x = grid[i - 1] + (grid[i] - grid[i - 1]) * (0 - y0) / (y1 - y0) if y1 != y0 else grid[i]
             bes.append(round(x, 1))
     return {"spot_grid": [round(x, 1) for x in grid], "at_expiry": at_expiry, "t0": t0,
-            "breakevens": bes, "spot": spot,
+            "breakevens": bes, "marker": marker, "mode": mode,
             "expiry": chosen.isoformat() if chosen else None,
-            "expiries": [e.isoformat() for e in exps]}
+            "expiries": [e.isoformat() for e in expiries]}
 
 
 # ⑥ Analyze tab (live recompute from deal ledger) -------------------------- #

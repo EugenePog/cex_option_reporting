@@ -52,6 +52,24 @@ class BalanceTimeseries(Base):
     equity_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
 
+class UnderlyingPrice(Base):
+    """Grain: (subaccount_id, underlying, captured_at). Underlying spot/forward over time.
+
+    Powers the payoff report's spot marker and the settlement (expiration) price for expired
+    options — keeps that report gold-only (no silver reads at query time).
+    """
+
+    __tablename__ = "underlying_price"
+    __table_args__ = (UniqueConstraint("subaccount_id", "underlying", "captured_at",
+                                       name="uq_gold_underlying_price"), {"schema": GOLD})
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    subaccount_id: Mapped[int] = _sub_fk()
+    underlying: Mapped[str] = mapped_column(String(32), index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    idx_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    fwd_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+
 class AssetBalanceTimeseries(Base):
     """Grain: (subaccount_id, ccy, captured_at). Per-asset balance in coin + its USD value.
 

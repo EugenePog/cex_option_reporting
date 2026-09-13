@@ -1,4 +1,4 @@
-.PHONY: help install dev db-up db-down migrate revision init-db seed collect-snapshot-loop collect-loop backfill pipeline pipeline-silver pipeline-gold debug-expiries web test lint format typecheck
+.PHONY: help install dev db-up db-down migrate revision init-db seed collect-snapshot-loop collect-loop backfill pipeline pipeline-silver pipeline-gold debug-expiries debug-payoff web test lint format typecheck
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -44,6 +44,9 @@ pipeline-gold:  ## Run only silver->gold
 
 debug-expiries:  ## Trace closed/expired options across bronze/silver/gold (args: D1=YYYY-MM-DD D2=YYYY-MM-DD)
 	scripts/debug_expiries.sh $(D1) $(D2)
+
+debug-payoff:  ## Diagnose report 2 (payoff): expiry coverage + settlement-price gaps (arg: ULY=BTC-USD)
+	scripts/debug_payoff.sh $(ULY)
 
 web:  ## Run the web app (dev, autoreload)
 	uvicorn app.web.main:app --reload --host 0.0.0.0 --port 8000

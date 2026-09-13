@@ -263,7 +263,8 @@ async function renderPayoff(resetExpiry) {
   if (expiredNote)
     ann.push({xref:"paper",x:0.5,yref:"paper",y:1.06,text:"expired "+(d.expiry||""),showarrow:false,font:{color:"#8b93a1",size:11}});
   Plotly.newPlot("c-payoff", traces, layout({ xaxis:{title:"Underlying price"},
-    yaxis:{title:"Strategy P&L (USD)"}, shapes, annotations:ann, margin:{l:64,r:16,t:10,b:36} }), CFG);
+    yaxis:{title:"Strategy P&L (USD)"}, shapes, annotations:ann, margin:{l:64,r:16,t:10,b:36},
+    hovermode:"x unified", hoverlabel:{namelength:-1} }), CFG);
 }
 boot();
 </script>

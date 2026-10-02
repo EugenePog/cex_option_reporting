@@ -177,6 +177,32 @@ sees only their own subaccounts; an `admin` sees all.
 > The dashboard reads the **gold** tables, so run `make pipeline` first (and keep the collectors
 > running) so there's data to show.
 
+An **admin** also gets a third tab, **Box builder** (http://localhost:8000/box-builder): pick the
+account in the page header ("Box builder for account: …"), then move position legs — one by one or
+as a multi-selection — between **boxes** (the GUI's name for the account's strategies) by drag & drop,
+review the P&L impact, and apply. The leg filters in the Legs panel narrow the legs list only; each
+box always shows all its legs. Each apply writes manual pins to `core.strategy_link` (they beat every `strategy_rule`) and
+recomputes silver + gold in the background.
+
+## 10b. Upgrading an existing database to the Box builder (migrations 0016 + 0017)
+
+```bash
+pm2 stop all                      # old pipeline code can't run against the new schema
+git pull                          # (or apply the patch) — then, in the venv:
+make migrate                      # 0016 fill dedupe fix · 0017 position legs + strategy_link
+python -m app.cli backfill        # re-collect history: recovers fills that the old
+                                  # (cex_code, trade_id) key dropped — OKX keeps ~3 months of fills
+make pipeline                     # builds silver.position_leg / gold.position_leg, links rows
+pm2 start ecosystem.config.js
+```
+
+- **0016** — fills were deduped on `(cex_code, trade_id)`, but OKX `tradeId` is per instrument, so
+  a fill sharing a tradeId with an older fill on another instrument was silently skipped. Key is
+  now `(cex_code, inst_id, trade_id)` in bronze and silver.
+- **0017** — the **position leg** (OKX `posId` + `cTime`) becomes the unit of strategy tagging;
+  `core.strategy_link` holds manual pins; `silver.trade_fill.strategy_id` is removed (fills link
+  to their leg via `position_leg_id`); closed positions are keyed on `posId + cTime`.
+
 ---
 
 ## Running everything as services (pm2)

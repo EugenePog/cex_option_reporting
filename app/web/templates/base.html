@@ -7,6 +7,7 @@
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
   onerror="this.onerror=null;document.write('<scr'+'ipt src=\'https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.2/plotly.min.js\'></scr'+'ipt>')"></script>
 <script src="/static/app.js?v={{ asset_ver }}"></script>
+{% block head %}{% endblock %}
 </head><body>
 <div id="jserr" style="display:none;background:#2a1113;border-bottom:1px solid #5b1e22;color:#f7a6a6;padding:8px 22px;font-size:13px"></div>
 <script>
@@ -23,6 +24,7 @@ window.addEventListener("unhandledrejection", e => _showJsErr((e.reason && e.rea
     <nav>
       <a href="/" class="{% block nav_dash %}{% endblock %}">Dashboard</a>
       <a href="/analyze" class="{% block nav_analyze %}{% endblock %}">Analyze</a>
+      {% if user.is_admin %}<a href="/box-builder" class="{% block nav_box %}{% endblock %}">Box builder</a>{% endif %}
     </nav>
     <span class="spacer"></span>
     <span class="who">{{ user.display_name or user.email }}{% if user.is_admin %}<span class="badge">ADMIN</span>{% endif %}</span>

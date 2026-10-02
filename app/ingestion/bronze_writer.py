@@ -1,7 +1,8 @@
 """BronzeWriter — persists raw connector rows to the bronze layer, tracked by an ingest_run.
 
 Every write is tied to a run so bronze is auditable and replayable. Fills are upserted on
-(cex_code, trade_id) so daily overlaps and full backfills never create duplicates.
+(cex_code, inst_id, trade_id) — OKX tradeId is per-instrument — and closed positions on the leg key
+(cex_code, posId, cTime), so daily overlaps and full backfills neither duplicate nor drop rows.
 """
 from __future__ import annotations
 
@@ -85,7 +86,12 @@ class BronzeWriter:
 
     # -- fills (idempotent upsert) ------------------------------------------ #
     def write_fills(self, ingest_id: str, rows: list[Any], subacct: str = "") -> int:
-        """Upsert fills; existing (cex_code, trade_id) rows are left as-is (do-nothing)."""
+        """Upsert fills; existing (cex_code, inst_id, trade_id) rows are left as-is (do-nothing).
+
+        OKX tradeId is a per-instrument counter, so inst_id must be part of the key: keyed on
+        (cex_code, trade_id) alone, a fill sharing a tradeId with an older fill on ANOTHER
+        instrument was silently skipped.
+        """
         if not rows:
             return 0
         written = 0
@@ -96,11 +102,12 @@ class BronzeWriter:
                     cex_code=self.cex_code,
                     account_label=self.account_label,
                     subacct_name=subacct,
+                    inst_id=r.inst_id,
                     trade_id=r.trade_id,
                     captured_at=r.filled_at,
                     payload=r.raw,
                 ).on_conflict_do_nothing(
-                    constraint="uq_raw_trade_fill_cex_trade"
+                    constraint="uq_raw_trade_fill_cex_inst_trade"
                 ).returning(RawTradeFill.id)
                 # RETURNING yields a row only for actual inserts; skipped conflicts yield none.
                 # (rowcount is unreliable for ON CONFLICT DO NOTHING across drivers.)
@@ -109,7 +116,9 @@ class BronzeWriter:
 
     # -- closed positions / expiry PnL (idempotent upsert) ------------------ #
     def write_closed_positions(self, ingest_id: str, rows: list[Any], subacct: str = "") -> int:
-        """Upsert closed positions; existing (cex_code, ext_id) rows are left as-is."""
+        """Upsert closed positions; existing leg keys (cex_code, ext_id=posId, pos_opened_at=cTime)
+        are left as-is. cTime is in the key because OKX re-uses a posId when an instrument is
+        reopened within 30 days of a full close — each lifecycle is its own row."""
         if not rows:
             return 0
         written = 0
@@ -121,10 +130,11 @@ class BronzeWriter:
                     account_label=self.account_label,
                     subacct_name=subacct,
                     ext_id=r.ext_id,
+                    pos_opened_at=r.opened_at,
                     captured_at=r.closed_at,
                     payload=r.raw,
                 ).on_conflict_do_nothing(
-                    constraint="uq_raw_closed_position_cex_ext"
+                    constraint="uq_raw_closed_position_leg"
                 ).returning(RawClosedPosition.id)
                 written += len(s.execute(stmt).fetchall())
         return written

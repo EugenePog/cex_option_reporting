@@ -44,3 +44,28 @@ def test_priority_and_unassigned_fallback():
     # nothing matches → unassigned
     assert assign_strategy(rules, _rec(inst_id="ETH-USD-1-1-P", underlying="ETH-USD", opt_type="P"),
                            unassigned_id=99) == 99
+
+
+# --- manual pin precedence (core.strategy_link > strategy_rule > unassigned) ----------------- #
+from app.domain.strategy_rules import resolve_strategy  # noqa: E402
+
+_RULES = [Rule(strategy_id=10, priority=100, match_json={"inst_pattern": "BTC-USD-*"})]
+
+
+def test_pin_beats_matching_rule():
+    res = resolve_strategy(_RULES, _rec(), unassigned_id=99, pinned_strategy_id=42)
+    assert (res.strategy_id, res.source, res.rule_strategy_id) == (42, "manual", 10)
+
+
+def test_rule_when_no_pin():
+    res = resolve_strategy(_RULES, _rec(), unassigned_id=99)
+    assert (res.strategy_id, res.source, res.rule_strategy_id) == (10, "rule", 10)
+
+
+def test_default_when_nothing_matches():
+    rec = _rec(inst_id="ETH-USD-1-1-P", underlying="ETH-USD", opt_type="P")
+    res = resolve_strategy(_RULES, rec, unassigned_id=99)
+    assert (res.strategy_id, res.source, res.rule_strategy_id) == (99, "default", 99)
+    # a pin also beats the unassigned fallback, and remembers what the rules would give
+    res = resolve_strategy(_RULES, rec, unassigned_id=99, pinned_strategy_id=7)
+    assert (res.strategy_id, res.source, res.rule_strategy_id) == (7, "manual", 99)

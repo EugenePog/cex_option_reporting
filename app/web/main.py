@@ -1,4 +1,4 @@
-"""FastAPI app: authenticated dashboard (reports ①–⑤) + Analyze tab (⑥).
+"""FastAPI app: authenticated dashboard (reports ①–⑤) + Analyze tab (⑥) + admin Box builder.
 
 Server-rendered pages (Jinja2, dark theme) that fetch JSON from /api/* and draw Plotly charts.
 Auth is a signed session cookie; pages redirect to /login when not authenticated.
@@ -16,6 +16,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.db.base import SessionLocal
 from app.db.models_core import CoreUser
+from app.web.admin.box_builder import router as box_builder_router
 from app.web.deps import CurrentUser, get_current_user, get_optional_user
 from app.web.reports import router as reports_router
 from app.web.security import verify_password
@@ -40,6 +41,7 @@ app = FastAPI(title="CEX Option Reporting")
 app.add_middleware(SessionMiddleware, secret_key=get_settings().app_secret_key or "dev-insecure-key")
 app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
 app.include_router(reports_router)
+app.include_router(box_builder_router)   # admin-only: /api/admin/box-builder/*
 
 
 @app.get("/healthz")
@@ -87,6 +89,17 @@ def analyze_page(request: Request):
     if user is None:
         return RedirectResponse("/login", status_code=303)
     return templates.TemplateResponse(request, "analyze.html", {"user": user})
+
+
+@app.get("/box-builder", response_class=HTMLResponse)
+def box_builder_page(request: Request):
+    """Admin-only tab: move position legs between strategies (manual links over rules)."""
+    user = get_optional_user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not user.is_admin:
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(request, "box_builder.html", {"user": user})
 
 
 # JSON identity for the frontend nav

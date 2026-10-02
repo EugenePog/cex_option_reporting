@@ -1,8 +1,12 @@
 """Silver-layer ORM models (schema: silver) — cleaned, typed, deduplicated, strategy-tagged.
 
 Derived from bronze by the bronze->silver pipeline. One row per (entity, snapshot) for snapshots;
-one row per event for fills / closed positions. Scoped to a core.subaccount; positions/fills/closed
-carry a nullable strategy_id.
+one row per event for fills / closed positions. Scoped to a core.subaccount.
+
+Strategy tagging is done ONCE per position leg (`position_leg`, key = OKX posId + cTime):
+manual pin (core.strategy_link) → strategy_rule → unassigned. Snapshots and closed positions
+inherit the leg's strategy_id (+ strategy_source); fills carry no strategy of their own — they
+link to their leg via `position_leg_id`.
 """
 from __future__ import annotations
 
@@ -38,6 +42,15 @@ class PositionSnapshot(Base):
     subaccount_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.subaccount.id"), index=True)
     strategy_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("core.strategy.id"), nullable=True, index=True
+    )
+    # Leg link (0017): OKX posId + cTime from the payload, and the resolved silver.position_leg row.
+    # manual | rule | default
+    strategy_source: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    pos_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pos_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    position_leg_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("silver.position_leg.id", ondelete="SET NULL"), nullable=True,
+        index=True,
     )
     inst_id: Mapped[str] = mapped_column(String(64), index=True)
     underlying: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -107,17 +120,25 @@ class MarginSnapshot(Base):
 
 
 class TradeFill(Base):
+    """One execution. Deduped on (cex_code, inst_id, trade_id) — OKX tradeId is per-instrument.
+
+    No strategy_id of its own (removed in 0017): a fill belongs to a position leg
+    (`position_leg_id`, resolved by subaccount + inst_id + fill time inside the leg's
+    [cTime, uTime] window) and takes the leg's strategy via that link.
+    """
+
     __tablename__ = "trade_fill"
     __table_args__ = (
-        UniqueConstraint("cex_code", "trade_id", name="uq_silver_trade_fill"),
+        UniqueConstraint("cex_code", "inst_id", "trade_id", name="uq_silver_trade_fill"),
         {"schema": SILVER},
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     cex_code: Mapped[str] = mapped_column(String(16))
     subaccount_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.subaccount.id"), index=True)
-    strategy_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("core.strategy.id"), nullable=True, index=True
+    position_leg_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("silver.position_leg.id", ondelete="SET NULL"), nullable=True,
+        index=True,
     )
     inst_id: Mapped[str] = mapped_column(String(64), index=True)
     underlying: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -169,7 +190,9 @@ class ClosedPosition(Base):
 
     __tablename__ = "closed_position"
     __table_args__ = (
-        UniqueConstraint("cex_code", "ext_id", name="uq_silver_closed_position"),
+        # leg key: (posId, cTime) — posId alone is re-used by OKX on reopen within 30 days (0017)
+        UniqueConstraint("cex_code", "ext_id", "opened_at", name="uq_silver_closed_position",
+                         postgresql_nulls_not_distinct=True),
         {"schema": SILVER},
     )
 
@@ -178,6 +201,12 @@ class ClosedPosition(Base):
     subaccount_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.subaccount.id"), index=True)
     strategy_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("core.strategy.id"), nullable=True, index=True
+    )
+    # manual | rule | default
+    strategy_source: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    position_leg_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("silver.position_leg.id", ondelete="SET NULL"), nullable=True,
+        index=True,
     )
     inst_id: Mapped[str] = mapped_column(String(64), index=True)
     underlying: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -197,3 +226,60 @@ class ClosedPosition(Base):
     closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     ext_id: Mapped[str] = mapped_column(String(64), index=True)
     ingest_id: Mapped[str] = mapped_column(String(36))
+
+
+class PositionLeg(Base):
+    """One position lifecycle ("leg") — the single entity the Box builder moves between strategies.
+
+    Key = (cex_code, subaccount_id, pos_id = OKX posId, pos_opened_at = OKX cTime). Built from
+    bronze.raw_position (open legs, latest snapshot) and bronze.raw_closed_position (closed legs).
+    The strategy is decided here ONCE (pin → rule → unassigned) and inherited by the leg's
+    position_snapshot / closed_position rows; trade_fill rows link here via position_leg_id.
+    Rows are upserted on the key, so `id` is stable across pipeline runs.
+    """
+
+    __tablename__ = "position_leg"
+    __table_args__ = (
+        UniqueConstraint("cex_code", "subaccount_id", "pos_id", "pos_opened_at",
+                         name="uq_position_leg"),
+        {"schema": SILVER},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cex_code: Mapped[str] = mapped_column(String(16))
+    subaccount_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.subaccount.id"),
+                                               index=True)
+    pos_id: Mapped[str] = mapped_column(String(64), index=True)
+    pos_opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    inst_id: Mapped[str] = mapped_column(String(64), index=True)
+    underlying: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    opt_type: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    strike: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
+    side: Mapped[str | None] = mapped_column(String(8), nullable=True)        # long | short
+    status: Mapped[str] = mapped_column(String(8))           # open | closed | stale (see pipeline)
+    size: Mapped[float | None] = mapped_column(Numeric, nullable=True)        # contracts (max held)
+    entry_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    exit_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    close_type: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # coin (closed)
+    upl: Mapped[float | None] = mapped_column(Numeric, nullable=True)           # coin (latest snap)
+    fee: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    ccy: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    idx_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)        # index at last snap
+    n_fills: Mapped[int] = mapped_column(Integer, default=0)
+    n_snapshots: Mapped[int] = mapped_column(Integer, default=0)
+    strategy_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("core.strategy.id"), nullable=True, index=True
+    )
+    # manual | rule | default
+    strategy_source: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    rule_strategy_id: Mapped[int | None] = mapped_column(          # what rules alone would assign
+        Integer, ForeignKey("core.strategy.id"), nullable=True
+    )
+    strategy_link_id: Mapped[int | None] = mapped_column(          # the pin applied, if any
+        BigInteger, ForeignKey("core.strategy_link.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

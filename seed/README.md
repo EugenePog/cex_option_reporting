@@ -33,7 +33,15 @@ python -m app.cli seed --replace         # truncate the seed tables first, then 
 - `match_json` is JSON inside a CSV cell — wrap the whole cell in double quotes and double any inner
   quotes, e.g. `"{""inst_pattern"": ""BTC-USD-*""}"`.
 - Tables NOT seeded here: `instrument` (populated by the silver pipeline), `audit_log` and
-  `pipeline_watermark` (written by the app/pipeline).
+  `pipeline_watermark` (written by the app/pipeline), and `strategy_link` — the **manual strategy
+  links (pins)** written by the admin **Box builder** tab.
+- **`--replace` and manual pins:** `--replace` truncates with `CASCADE`, which would also empty
+  `core.strategy_link` (and silver/gold, which are rebuildable — pins are not). The loader therefore
+  **refuses `--replace` while pins exist**; seed without `--replace` (upsert by `id`), or pass
+  `--wipe-links` if you really want to drop them.
+- **Strategies created in the Box builder** (`+ New box` — a box is a strategy) live only in the database. Add them
+  to `strategy.csv` (with their DB `id`) to keep them in git — a CSV row reusing the same `id` for
+  something else would overwrite them on the next seed.
 
 ## Allowed values (data dictionary)
 
@@ -87,6 +95,11 @@ falls into the `unassigned` strategy.
 {"underlying": "BTC-USD"}                            // exact underlying
 {"opened_after": "2026-06-01", "opened_before": "2026-07-01"}  // opened-time window (UTC dates)
 ```
+
+> **Precedence:** a manual pin set in the Box builder (`core.strategy_link`) always wins over
+> every rule; rules decide only for legs without a pin. Rules are evaluated once per **position
+> leg** (posId + open time): `side` is the leg direction and `opened_after/before` compare the
+> leg's open time (OKX `cTime`), so all rows of a leg get the same strategy.
 
 Example — tag all BTC-USD short calls opened in June as strategy 1:
 

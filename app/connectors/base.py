@@ -87,9 +87,12 @@ class OptionSummaryRow:
 
 @dataclass
 class FillRow:
-    """A single trade fill — the basis for realized PnL on positions closed by *trading*."""
+    """A single trade fill — the basis for realized PnL on positions closed by *trading*.
 
-    trade_id: str
+    Dedup key in bronze/silver is (cex_code, inst_id, trade_id): OKX tradeId is per-instrument.
+    """
+
+    trade_id: str                 # exchange trade id — unique only WITHIN an instrument
     inst_id: str
     side: str                     # "buy" / "sell"
     size: float
@@ -126,14 +129,14 @@ class ClosedPositionRow:
     `close_type` is the exchange's reason code (e.g. OKX 'type': close/liquidation/delivery).
     """
 
-    ext_id: str                   # exchange position id (posId) — dedup key
+    ext_id: str                   # exchange position id (posId) — dedup key with opened_at
     inst_id: str
     realized_pnl: float
     pnl: float
     close_type: str
     open_avg_px: float
     close_avg_px: float
-    opened_at: datetime | None
+    opened_at: datetime | None    # cTime — with ext_id forms the leg key (posId is re-used)
     closed_at: datetime
     captured_at: datetime
     raw: dict[str, Any] = field(default_factory=dict)

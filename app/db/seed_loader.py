@@ -5,7 +5,12 @@ dependency order, then the id sequence is reset. Re-running updates rather than 
 
 Only the manually-managed settings tables are handled here:
     user -> cex_account -> subaccount -> strategy -> strategy_rule
-(`instrument` is derived by the silver pipeline; `audit_log` / `pipeline_watermark` are app-written.)
+(`instrument` is derived by the silver pipeline; `audit_log` / `pipeline_watermark` are app-written;
+`strategy_link` holds the Box builder's manual pins — app-written, never seeded.)
+
+`--replace` truncates with CASCADE, which also empties every table referencing core.strategy —
+including core.strategy_link. Manual pins are NOT rebuildable from bronze, so replace refuses to run
+while pins exist unless explicitly allowed (`wipe_links=True` / `--wipe-links`).
 """
 from __future__ import annotations
 
@@ -82,10 +87,17 @@ def _reset_sequence(session, model: type, quoted: str) -> None:
     ))
 
 
-def load_seed(folder: str = "seed", only: str | None = None, replace: bool = False) -> dict[str, int]:
+class SeedReplaceWouldWipeLinks(RuntimeError):
+    """`--replace` would TRUNCATE ... CASCADE away the Box builder's manual pins."""
+
+
+def load_seed(folder: str = "seed", only: str | None = None, replace: bool = False,
+              wipe_links: bool = False) -> dict[str, int]:
     """Load CSVs from `folder` into core tables. Returns {table: rows_loaded}.
 
-    `only` restricts to one table; `replace` truncates the target tables first (CASCADE).
+    `only` restricts to one table; `replace` truncates the target tables first (CASCADE). Because
+    CASCADE also empties core.strategy_link (manual pins), replace refuses while pins exist unless
+    `wipe_links` is set.
     """
     base = Path(folder)
     if not base.is_dir():
@@ -98,6 +110,14 @@ def load_seed(folder: str = "seed", only: str | None = None, replace: bool = Fal
     counts: dict[str, int] = {}
     with session_scope() as s:
         prep = s.bind.dialect.identifier_preparer
+
+        if replace and not wipe_links:
+            n_links = s.execute(text("SELECT count(*) FROM core.strategy_link")).scalar_one()
+            if n_links:
+                raise SeedReplaceWouldWipeLinks(
+                    f"seed --replace would delete {n_links} manual strategy link(s) "
+                    "(core.strategy_link, Box builder pins) via TRUNCATE ... CASCADE. "
+                    "Seed without --replace (upsert by id), or pass --wipe-links to drop them.")
 
         if replace:
             # Truncate in reverse dependency order; CASCADE handles the rest.

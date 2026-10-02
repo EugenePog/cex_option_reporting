@@ -1,26 +1,33 @@
 """Core-layer ORM models (schema: core) — settings / dimension tables.
 
 These are the manually-managed tables (users, accounts, subaccounts, strategies, rules) plus a
-couple of system tables (audit_log, pipeline_watermark). Silver/gold rows are scoped and tagged
-via these. Kept in their own module; imported by app.db.models so a single import registers all.
+couple of system tables (audit_log, pipeline_watermark) and the app-written manual strategy links
+(strategy_link, written by the admin Box builder — NOT seeded). Silver/gold rows are scoped and
+tagged via these. Kept in their own module; imported by app.db.models so a single import registers
+all.
 """
 from __future__ import annotations
 
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -71,7 +78,11 @@ class Subaccount(Base):
 
 class Strategy(Base):
     __tablename__ = "strategy"
-    __table_args__ = {"schema": CORE}
+    __table_args__ = (
+        # target of strategy_link's composite FK (strategy must belong to the leg's subaccount)
+        UniqueConstraint("id", "subaccount_id", name="uq_strategy_id_subaccount"),
+        {"schema": CORE},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     subaccount_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.subaccount.id"))
@@ -90,6 +101,50 @@ class StrategyRule(Base):
     match_json: Mapped[dict] = mapped_column(JSONB)  # e.g. {"inst_pattern": "BTC-USD-*"}
     strategy_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.strategy.id"))
     priority: Mapped[int] = mapped_column(Integer, default=100)
+
+
+class StrategyLink(Base):
+    """Manual strategy link ("pin") for one position leg — written by the admin Box builder.
+
+    Append-only: every Apply / Reset / Undo inserts new rows and stamps `superseded_at` on the row
+    it replaces, so the table is its own history. The CURRENT state of a leg is its row with
+    superseded_at IS NULL (at most one — partial unique index). action='pin' forces strategy_id onto
+    the leg and beats every strategy_rule; action='unpin' hands the leg back to the rules.
+
+    Leg key = (cex_code, subaccount_id, pos_id = OKX posId, pos_opened_at = OKX cTime), the same key
+    as silver.position_leg. The composite FK (strategy_id, subaccount_id) → core.strategy(id,
+    subaccount_id) guarantees a leg can only be pinned to a strategy of its own subaccount.
+    """
+
+    __tablename__ = "strategy_link"
+    __table_args__ = (
+        ForeignKeyConstraint(["strategy_id", "subaccount_id"],
+                             ["core.strategy.id", "core.strategy.subaccount_id"],
+                             name="fk_strategy_link_strategy_same_subaccount"),
+        CheckConstraint("action IN ('pin', 'unpin')", name="ck_strategy_link_action"),
+        CheckConstraint("(action = 'pin') = (strategy_id IS NOT NULL)",
+                        name="ck_strategy_link_pin_has_strategy"),
+        Index("uq_strategy_link_current", "cex_code", "subaccount_id", "pos_id", "pos_opened_at",
+              unique=True, postgresql_where=text("superseded_at IS NULL")),
+        Index("ix_strategy_link_changeset", "changeset_id"),
+        {"schema": CORE},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    subaccount_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.subaccount.id"))
+    cex_code: Mapped[str] = mapped_column(String(16))
+    pos_id: Mapped[str] = mapped_column(String(64))
+    pos_opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    inst_id: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(8))
+    strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prev_strategy_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("core.strategy.id"), nullable=True)
+    changeset_id: Mapped[str] = mapped_column(UUID(as_uuid=False))
+    reason: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[int] = mapped_column(Integer, ForeignKey("core.user.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Instrument(Base):

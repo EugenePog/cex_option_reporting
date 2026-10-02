@@ -308,3 +308,45 @@ class SymbolPerformance(Base):
     profit_factor: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     n_deals: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PositionLeg(Base):
+    """Grain: one row per position leg (silver.position_leg) — the Box builder board's read model.
+
+    Copies the leg's identity, strategy assignment (+ source and what rules alone would give) and
+    P&L, adding USD figures with the same coin→USD basis as gold.deal_ledger / pnl_daily:
+    realized at the close-day rate, unrealized at the last-snapshot-day rate. Added in 0017.
+    """
+
+    __tablename__ = "position_leg"
+    __table_args__ = ({"schema": GOLD},)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    position_leg_id: Mapped[int] = mapped_column(BigInteger, index=True)   # silver.position_leg.id
+    subaccount_id: Mapped[int] = _sub_fk()
+    strategy_id: Mapped[int | None] = _strat_fk_nullable()
+    # manual | rule | default
+    strategy_source: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    rule_strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pos_id: Mapped[str] = mapped_column(String(64))
+    pos_opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    inst_id: Mapped[str] = mapped_column(String(64), index=True)
+    underlying: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    opt_type: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    strike: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
+    side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    status: Mapped[str] = mapped_column(String(8))                  # open | closed | stale
+    size: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    entry_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    exit_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    close_type: Mapped[str | None] = mapped_column(String(8), nullable=True)   # 'close' | 'expiry'
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)      # coin
+    realized_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    upl: Mapped[float | None] = mapped_column(Numeric, nullable=True)               # coin
+    upl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    fee: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    ccy: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    n_fills: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    n_snapshots: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -81,30 +81,40 @@ class RawOptSummary(_RawBase):
 
 
 class RawTradeFill(_RawBase):
-    """Fills are deduplicated on (cex_code, trade_id) so re-runs / backfills are idempotent."""
+    """Fills are deduplicated on (cex_code, inst_id, trade_id) so re-runs/backfills are idempotent.
+
+    OKX `tradeId` is a counter PER INSTRUMENT (not unique across an account), so `inst_id` is part
+    of the key — deduping on (cex_code, trade_id) alone silently dropped fills (fixed in 0016).
+    """
 
     __tablename__ = "raw_trade_fill"
     __table_args__ = (
-        UniqueConstraint("cex_code", "trade_id", name="uq_raw_trade_fill_cex_trade"),
+        UniqueConstraint("cex_code", "inst_id", "trade_id",
+                         name="uq_raw_trade_fill_cex_inst_trade"),
         {"schema": BRONZE},
     )
 
+    inst_id: Mapped[str] = mapped_column(String(64), index=True)
     trade_id: Mapped[str] = mapped_column(String(64), index=True)
 
 
 class RawClosedPosition(_RawBase):
     """Closed positions incl. expiry/delivery — the source of realized PnL on expired options.
 
-    Deduplicated on (cex_code, ext_id) [OKX posId] so daily overlaps and backfills are idempotent.
+    Deduplicated on the position-leg key (cex_code, ext_id = OKX posId, pos_opened_at = OKX cTime):
+    OKX re-uses a posId when the same instrument is reopened within 30 days of a full close, so the
+    open time is part of the key (one row per position lifecycle). Added in 0017.
     """
 
     __tablename__ = "raw_closed_position"
     __table_args__ = (
-        UniqueConstraint("cex_code", "ext_id", name="uq_raw_closed_position_cex_ext"),
+        UniqueConstraint("cex_code", "ext_id", "pos_opened_at", name="uq_raw_closed_position_leg",
+                         postgresql_nulls_not_distinct=True),
         {"schema": BRONZE},
     )
 
     ext_id: Mapped[str] = mapped_column(String(64), index=True)
+    pos_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class RawBill(_RawBase):

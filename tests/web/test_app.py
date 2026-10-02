@@ -31,3 +31,15 @@ def test_dashboard_redirects_when_anonymous():
 def test_analyze_redirects_when_anonymous():
     r = client.get("/analyze", follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == "/login"
+
+
+def test_box_builder_redirects_when_anonymous():
+    r = client.get("/box-builder", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/login"
+
+
+def test_box_builder_api_requires_auth():
+    assert client.get("/api/admin/box-builder/scope").status_code == 401
+    r = client.post("/api/admin/box-builder/apply",
+                    json={"subaccount_id": 1, "moves": [], "reason": "x"})
+    assert r.status_code == 401

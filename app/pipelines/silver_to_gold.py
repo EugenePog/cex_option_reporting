@@ -30,6 +30,7 @@ from app.db.models_gold import (
     GreeksByExpiry,
     PnlDaily,
     PositionCurrent,
+    PositionLeg as GoldPositionLeg,
     StrategyPerformance,
     StrategySummary,
     SymbolPerformance,
@@ -39,6 +40,7 @@ from app.db.models_silver import (
     BalanceSnapshot,
     Bill,
     ClosedPosition,
+    PositionLeg,
     PositionSnapshot,
 )
 from app.domain.metrics import deal_metrics, equity_metrics
@@ -49,7 +51,7 @@ _GOLD_TABLES = [  # truncated in this order at the start of each rebuild
     "balance_timeseries", "asset_balance_timeseries", "pnl_daily", "asset_pnl_daily",
     "strategy_summary", "deal_ledger", "position_current", "underlying_price",
     "expiry_settlement", "greeks_by_expiry", "client_pnl_daily", "client_performance",
-    "strategy_performance", "symbol_performance",
+    "strategy_performance", "symbol_performance", "position_leg",
 ]
 
 
@@ -98,6 +100,7 @@ def run() -> dict[str, int]:
         counts["greeks_by_expiry"] = _build_greeks_by_expiry(s)
         counts["strategy_summary"] = _build_strategy_summary(s, today)
         counts["deal_ledger"] = _build_deal_ledger(s, rates)
+        counts["position_leg"] = _build_position_leg(s, rates)
         counts["pnl_daily"] = _build_pnl_daily(s, rates)
         counts["client_pnl_daily"] = _build_client_pnl_daily(s, sub_user, eod)
         counts.update(_build_performance(s, sub_user, today, now, eod))
@@ -344,6 +347,33 @@ def _build_deal_ledger(s, rates: _CoinUsd) -> int:
             closed_at=cp.closed_at, entry_px=cp.open_avg_px, exit_px=cp.close_avg_px,
             size=cp.size, fee=cp.fee, realized_pnl=cp.realized_pnl,
             realized_pnl_usd=_fl(cp.realized_pnl) * r, hold_days=hold,
+        ))
+        n += 1
+    return n
+
+
+def _build_position_leg(s, rates: _CoinUsd) -> int:
+    """One row per silver.position_leg (Box builder read model) with USD P&L on the same basis as
+    deal_ledger (realized × close-day rate) and pnl_daily (unrealized × last-snapshot-day rate)."""
+    n = 0
+    for lg in s.execute(select(PositionLeg)).scalars():
+        r_real = rates.rate(lg.subaccount_id, lg.ccy, lg.closed_at.date()) if lg.closed_at else None
+        seen = lg.last_seen_at or lg.pos_opened_at
+        r_upl = rates.rate(lg.subaccount_id, lg.ccy or _asset_of(lg.underlying), seen.date()) \
+            if seen else 1.0
+        s.add(GoldPositionLeg(
+            position_leg_id=lg.id, subaccount_id=lg.subaccount_id, strategy_id=lg.strategy_id,
+            strategy_source=lg.strategy_source, rule_strategy_id=lg.rule_strategy_id,
+            pos_id=lg.pos_id, pos_opened_at=lg.pos_opened_at, inst_id=lg.inst_id,
+            underlying=lg.underlying, opt_type=lg.opt_type, strike=lg.strike, expiry=lg.expiry,
+            side=lg.side, status=lg.status, size=lg.size, entry_px=lg.entry_px,
+            exit_px=lg.exit_px, closed_at=lg.closed_at,
+            close_type=_close_type(lg.close_type) if lg.close_type is not None else None,
+            last_seen_at=lg.last_seen_at, realized_pnl=lg.realized_pnl,
+            realized_pnl_usd=(_fl(lg.realized_pnl) * r_real
+                              if lg.realized_pnl is not None and r_real is not None else None),
+            upl=lg.upl, upl_usd=(_fl(lg.upl) * r_upl if lg.upl is not None else None),
+            fee=lg.fee, ccy=lg.ccy, n_fills=lg.n_fills, n_snapshots=lg.n_snapshots,
         ))
         n += 1
     return n

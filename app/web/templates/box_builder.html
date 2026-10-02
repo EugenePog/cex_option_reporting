@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Box builder · CEX Option Reporting{% endblock %}
+{% block nav_box %}active{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/box_builder.css?v={{ asset_ver }}">{% endblock %}
+{% block body %}
+<!-- 1 · the account scopes everything on the page: legs AND boxes -->
+<div class="bb-hdr">
+  <span class="bb-mk">1</span>
+  <h1 class="page">Box builder for account:</h1>
+  <select id="f-sub" class="bb-acct" aria-label="Account"></select>
+  <span class="sub bb-hdr-sub">Move position legs between boxes — staged, reviewed, then applied. Pins override rules.</span>
+  <span class="spacer"></span>
+  <div class="bb-seg" id="bb-view" role="tablist">
+    <button type="button" data-view="board" class="on">Board</button>
+    <button type="button" data-view="table">Table</button>
+    <button type="button" data-view="history">History</button>
+  </div>
+</div>
+
+<div class="bb-sync" id="bb-sync" hidden></div>
+
+<!-- ======================= BOARD ======================= -->
+<div class="bb-main" id="view-board">
+  <div class="card bb-legs">
+    <div class="bb-ph"><span class="bb-mk">2</span><h2>Legs</h2>
+      <span class="muted bb-small">one row per position lifecycle (posId + open time)</span>
+      <span class="spacer" style="flex:1"></span>
+      <span class="badge bb-count" id="bb-count">– legs</span>
+      <div class="bb-menu-wrap">
+        <button type="button" class="bb-btn" id="btn-moveto" disabled>Move to… ▾</button>
+        <div class="bb-menu" id="menu-moveto" hidden></div>
+      </div>
+    </div>
+    <!-- leg filters: narrow this list (and the Table view) only — boxes always show all their legs -->
+    <div class="bb-lfilters" id="bb-lfilters">
+      <div class="fld"><label>Underlying</label><select id="f-uly"></select></div>
+      <div class="fld"><label>Opened from</label><input type="date" id="f-from"></div>
+      <div class="fld"><label>Opened till</label><input type="date" id="f-to"></div>
+      <div class="fld"><label>Status</label>
+        <select id="f-status"><option value="">Open + closed</option><option value="open">Open</option><option value="closed">Closed</option></select></div>
+      <div class="fld"><label>Source</label>
+        <div class="bb-chips" id="f-source">
+          <button type="button" data-v="" class="on">All</button><button type="button" data-v="rule">Rule</button><button type="button" data-v="manual">Pinned</button><button type="button" data-v="default">Default</button>
+        </div></div>
+      <div class="fld bb-find"><label>Find</label><input id="f-q" placeholder="inst_id or posId…"></div>
+      <button type="button" class="bb-btn ghost bb-clear" id="f-clear" hidden>Clear filters</button>
+    </div>
+    <div class="bb-th" id="legs-th"><span><input type="checkbox" id="sel-all" title="Select all shown"></span><span>Leg</span><span>Side</span><span>Opened → closed</span><span class="r">P&amp;L</span><span>Box</span></div>
+    <div id="legs-body" class="bb-legs-body"></div>
+    <div class="bb-foot muted">Drag a leg onto a box · dragging a selected leg moves the whole selection · shift-click to range-select · <b>M</b> = move selection</div>
+  </div>
+  <div class="bb-board">
+    <div class="bb-ph"><span class="bb-mk">3</span><h2>Boxes</h2>
+      <span class="muted bb-small">drop targets — every box of the account with all its legs (leg filters don't apply)</span>
+      <span class="spacer" style="flex:1"></span>
+      <button type="button" class="bb-btn ghost" id="btn-newstrat">+ New box</button></div>
+    <div class="bb-cols" id="cols"></div>
+  </div>
+</div>
+
+<!-- ======================= TABLE ======================= -->
+<div class="card" id="view-table" hidden>
+  <div class="bb-ph"><span class="bb-mk">2</span><h2>Legs</h2>
+    <span class="muted bb-small">change the box of any leg — changes are staged below until you review &amp; apply</span>
+    <span class="spacer" style="flex:1"></span><span class="badge bb-count" id="bb-count-t">– legs</span></div>
+  <div id="table-filters"></div>
+  <div class="bb-table-wrap"><table class="bb-table">
+    <thead><tr><th>Instrument</th><th>Side</th><th>Size</th><th>Opened</th><th>Closed / status</th><th>P&amp;L</th><th>Source</th><th>Box</th></tr></thead>
+    <tbody id="table-body"></tbody>
+  </table></div>
+</div>
+
+<!-- ======================= HISTORY ======================= -->
+<div class="card" id="view-history" hidden>
+  <h2>History</h2><p class="hint">Every Apply / Reset / Undo is one changeset in <code>core.strategy_link</code> (append-only). Undo restores what each leg had before.</p>
+  <div id="history-body"></div>
+</div>
+
+<!-- ======================= STAGED CHANGES BAR ======================= -->
+<div class="bb-pending" id="bb-pending" hidden>
+  <span class="bb-mk">4</span><span class="bb-pd"></span>
+  <b id="pend-count"></b><span id="pend-summary" class="bb-pend-sum"></span>
+  <span class="spacer" style="flex:1"></span>
+  <button type="button" class="bb-btn ghost" id="pend-undo">Undo</button>
+  <button type="button" class="bb-btn ghost" id="pend-discard">Discard</button>
+  <button type="button" class="bb-btn primary" id="pend-review">Review &amp; apply →</button>
+</div>
+
+<!-- ======================= REVIEW DIALOG ======================= -->
+<div class="bb-overlay" id="dlg-review" hidden>
+  <div class="bb-dialog" role="dialog" aria-labelledby="rv-title">
+    <button type="button" class="bb-x" data-close>✕</button>
+    <h2 id="rv-title"><span class="bb-mk">5</span>Review &amp; apply</h2>
+    <div class="sub" id="rv-sub"></div>
+    <div class="bb-scroll"><table class="bb-table bb-rv">
+      <thead><tr><th>Leg</th><th>From</th><th>To</th><th class="r">Fills · snaps · closed</th><th class="r">P&amp;L</th></tr></thead>
+      <tbody id="rv-moves"></tbody></table></div>
+    <div class="bb-sec">Impact on boxes (net P&amp;L, all legs of the account)</div>
+    <div id="rv-impact"></div>
+    <div class="bb-sec">Reason (required — saved with the changeset)</div>
+    <textarea id="rv-reason" rows="2" placeholder="Why are these legs moving?"></textarea>
+    <label class="bb-ck"><input type="checkbox" checked disabled> <span><b>Pin these legs</b> — a manual link always beats the rules; the pipeline keeps it on every rerun.</span></label>
+    <div class="err" id="rv-err" hidden></div>
+    <div class="bb-dfoot"><span class="muted bb-small" id="rv-note"></span><span class="spacer" style="flex:1"></span>
+      <button type="button" class="bb-btn ghost" data-close>Cancel</button>
+      <button type="button" class="bb-btn primary" id="rv-apply">Apply</button></div>
+  </div>
+</div>
+
+<!-- ======================= LEG DRAWER ======================= -->
+<div class="bb-overlay bb-right" id="dlg-leg" hidden>
+  <div class="bb-drawer" role="dialog">
+    <button type="button" class="bb-x" data-close>✕</button>
+    <div id="leg-body"></div>
+  </div>
+</div>
+
+<!-- ======================= NEW BOX (core.strategy) ======================= -->
+<div class="bb-overlay" id="dlg-strat" hidden>
+  <div class="bb-dialog bb-small-dlg" role="dialog">
+    <button type="button" class="bb-x" data-close>✕</button>
+    <h2>New box</h2>
+    <div class="sub">Creates a box in <b id="ns-acct"></b>. It lives in the database — add it to <code>seed/strategy.csv</code> to keep it in git.</div>
+    <div class="bb-form">
+      <label>Name<input id="ns-name" maxlength="64" placeholder="e.g. weekend-straddle"></label>
+      <label>Color<input id="ns-color" type="color" value="#9b7be0"></label>
+      <label>Description<input id="ns-desc" placeholder="optional"></label>
+    </div>
+    <div class="err" id="ns-err" hidden></div>
+    <div class="bb-dfoot"><span class="spacer" style="flex:1"></span>
+      <button type="button" class="bb-btn ghost" data-close>Cancel</button>
+      <button type="button" class="bb-btn primary" id="ns-save">Create</button></div>
+  </div>
+</div>
+
+<div class="bb-toast" id="bb-toast" hidden></div>
+<script src="/static/box_builder.js?v={{ asset_ver }}"></script>
+{% endblock %}

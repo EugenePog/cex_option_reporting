@@ -34,12 +34,18 @@ def seed(
     folder: str = typer.Option("seed", help="Folder holding <table>.csv files."),
     table: str = typer.Option(None, help="Load only this table."),
     replace: bool = typer.Option(False, help="Truncate target tables before loading."),
+    wipe_links: bool = typer.Option(
+        False, help="With --replace: allow deleting the Box builder's manual strategy links."),
 ) -> None:
     """Load core/settings CSVs (user, cex_account, subaccount, strategy, strategy_rule) into the DB."""
     setup_logging()
-    from app.db.seed_loader import load_seed
+    from app.db.seed_loader import SeedReplaceWouldWipeLinks, load_seed
 
-    counts = load_seed(folder=folder, only=table, replace=replace)
+    try:
+        counts = load_seed(folder=folder, only=table, replace=replace, wipe_links=wipe_links)
+    except SeedReplaceWouldWipeLinks as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
     if not counts:
         typer.echo("No seed CSVs found.")
     for t, c in counts.items():

@@ -1,4 +1,12 @@
-"""Strategy tagging: match a position/fill/closed-position against core.strategy_rule rows.
+"""Strategy tagging: resolve a position LEG's strategy — manual pin first, then strategy_rule.
+
+Precedence (resolve_strategy):
+    1. manual pin   — the leg's current core.strategy_link row (action='pin'), set in Box builder
+    2. strategy_rule — highest `priority` match wins (match_json below)
+    3. unassigned   — the subaccount's "unassigned" strategy
+
+Tagging happens once per leg (silver.position_leg, key posId + cTime); snapshots and closed
+positions inherit the leg's result, fills link to the leg (no strategy of their own).
 
 match_json vocabulary (keys AND-ed together):
     inst_pattern   glob on inst_id           e.g. "BTC-USD-*"
@@ -9,7 +17,8 @@ match_json vocabulary (keys AND-ed together):
     opened_before  UTC date "YYYY-MM-DD"  (exclusive)
 
 Rules for a subaccount are evaluated highest-`priority` first; the first match wins. If nothing
-matches, the caller falls back to the subaccount's "unassigned" strategy.
+matches, the subaccount's "unassigned" strategy is used. `opened_at` is the leg's open time (cTime)
+and `side` the leg's direction (long/short), so a rule evaluates the same for every row of a leg.
 """
 from __future__ import annotations
 
@@ -72,9 +81,38 @@ def match_rule(match_json: dict[str, Any], rec: TagRecord) -> bool:
     return True
 
 
-def assign_strategy(rules: list[Rule], rec: TagRecord, unassigned_id: int | None) -> int | None:
-    """Return the strategy_id of the first matching rule (highest priority), else unassigned."""
+def first_matching_rule(rules: list[Rule], rec: TagRecord) -> Rule | None:
+    """The highest-priority rule matching the record (ties broken by strategy_id), or None."""
     for rule in sorted(rules, key=lambda r: (-r.priority, r.strategy_id)):
         if match_rule(rule.match_json, rec):
-            return rule.strategy_id
-    return unassigned_id
+            return rule
+    return None
+
+
+def assign_strategy(rules: list[Rule], rec: TagRecord, unassigned_id: int | None) -> int | None:
+    """Return the strategy_id of the first matching rule (highest priority), else unassigned."""
+    rule = first_matching_rule(rules, rec)
+    return rule.strategy_id if rule else unassigned_id
+
+
+# strategy_source values written to silver/gold
+SOURCE_MANUAL, SOURCE_RULE, SOURCE_DEFAULT = "manual", "rule", "default"
+
+
+@dataclass(frozen=True)
+class Resolution:
+    strategy_id: int | None
+    source: str                    # 'manual' | 'rule' | 'default'
+    rule_strategy_id: int | None   # what the rules alone would assign (shown as "without the pin")
+
+
+def resolve_strategy(rules: list[Rule], rec: TagRecord, unassigned_id: int | None,
+                     pinned_strategy_id: int | None = None) -> Resolution:
+    """Final strategy for a leg: manual pin > highest-priority rule > unassigned."""
+    rule = first_matching_rule(rules, rec)
+    rule_sid = rule.strategy_id if rule else unassigned_id
+    if pinned_strategy_id is not None:
+        return Resolution(pinned_strategy_id, SOURCE_MANUAL, rule_sid)
+    if rule is not None:
+        return Resolution(rule.strategy_id, SOURCE_RULE, rule_sid)
+    return Resolution(unassigned_id, SOURCE_DEFAULT, unassigned_id)

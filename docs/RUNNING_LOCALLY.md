@@ -181,7 +181,8 @@ An **admin** also gets a third tab, **Box builder** (http://localhost:8000/box-b
 account in the page header ("Box builder for account: …"), then move position legs — one by one or
 as a multi-selection — between **boxes** (the GUI's name for the account's strategies) by drag & drop,
 review the P&L impact, and apply. The leg filters in the Legs panel narrow the legs list only; each
-box always shows all its legs. Each apply writes manual pins to `core.strategy_link` (they beat every `strategy_rule`) and
+box always shows all its legs. The ✎ next to a box name renames / recolors it, or deletes it: its legs
+move to `unassigned` and the box is soft-deleted (Undo in *History* brings it back). Each apply writes manual pins to `core.strategy_link` (they beat every `strategy_rule`) and
 recomputes silver + gold in the background.
 
 ## 10b. Upgrading an existing database to the Box builder (migrations 0016 + 0017)
@@ -202,6 +203,13 @@ pm2 start ecosystem.config.js
 - **0017** — the **position leg** (OKX `posId` + `cTime`) becomes the unit of strategy tagging;
   `core.strategy_link` holds manual pins; `silver.trade_fill.strategy_id` is removed (fills link
   to their leg via `position_leg_id`); closed positions are keyed on `posId + cTime`.
+
+### 10c. Edit / delete boxes (migration 0018)
+
+```bash
+make migrate                      # 0018: core.strategy.deleted_at / deleted_by / deleted_changeset_id
+pm2 restart pipeline web          # new code ignores rules of deleted boxes; ✎ edit / delete in the UI
+```
 
 ---
 

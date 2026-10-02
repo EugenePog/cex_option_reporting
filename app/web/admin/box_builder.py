@@ -7,6 +7,10 @@ writes an append-only row to core.strategy_link (action='pin'), which the bronze
 applies with precedence over every strategy_rule; 'Reset to rule' writes action='unpin'. Each
 Apply / Reset / Undo is one changeset (uuid) and is also summarized in core.audit_log.
 
+Boxes can be created, edited (name / color / description) and deleted. Delete is a soft delete
+(core.strategy.deleted_at, 0018): every leg in the box is pinned to the account's `unassigned`
+box as one changeset, the box's rules stop applying, and Undo of that changeset restores the box.
+
 After a write the API queues a background recompute (silver + gold), serialized with the pm2
 pipeline loop through the runner's advisory lock. Until it finishes, the board shows the affected
 legs as "syncing" with their target strategy (current link vs. gold disagree).
@@ -46,6 +50,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin/box-builder", tags=["admin", "box-builder"])
 
 PIN, UNPIN = "pin", "unpin"
+UNASSIGNED = "unassigned"          # the pipeline's fallback box, found by name — not editable
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -121,9 +126,33 @@ def _check_sub(user: CurrentUser, subaccount_id: int) -> None:
         raise HTTPException(404, "Unknown account")
 
 
-def _strategies(s, sub_id: int) -> list[Strategy]:
-    return list(s.execute(select(Strategy).where(Strategy.subaccount_id == sub_id)
-                          .order_by(Strategy.id)).scalars())
+def _strategies(s, sub_id: int, include_deleted: bool = False) -> list[Strategy]:
+    q = select(Strategy).where(Strategy.subaccount_id == sub_id)
+    if not include_deleted:
+        q = q.where(Strategy.deleted_at.is_(None))
+    return list(s.execute(q.order_by(Strategy.id)).scalars())
+
+
+def _box_name(st: Strategy | None) -> str | None:
+    if st is None:
+        return None
+    return st.name + (" (deleted)" if st.deleted_at is not None else "")
+
+
+def _active_box(s, user: CurrentUser, strategy_id: int) -> Strategy:
+    st = s.get(Strategy, strategy_id)
+    if st is None or st.deleted_at is not None:
+        raise HTTPException(404, "Unknown box")
+    _check_sub(user, st.subaccount_id)
+    return st
+
+
+def _name_taken(s, sub_id: int, name: str, except_id: int | None = None) -> bool:
+    q = select(Strategy.id).where(Strategy.subaccount_id == sub_id, Strategy.deleted_at.is_(None),
+                                  func.lower(Strategy.name) == name.lower())
+    if except_id is not None:
+        q = q.where(Strategy.id != except_id)
+    return s.execute(q).first() is not None
 
 
 def _current_links(s, sub_id: int) -> dict[tuple, StrategyLink]:
@@ -295,7 +324,7 @@ def leg_detail(leg_id: int, user: CurrentUser = Depends(require_admin)) -> dict:
         _check_sub(user, leg.subaccount_id)
         legs = {lg["id"]: lg for lg in _load_legs(s, leg.subaccount_id)}
         cur = legs.get(leg_id)
-        strat = {st.id: st for st in _strategies(s, leg.subaccount_id)}
+        strat = {st.id: st for st in _strategies(s, leg.subaccount_id, include_deleted=True)}
         fills = s.execute(select(TradeFill).where(TradeFill.position_leg_id == leg_id)
                           .order_by(TradeFill.filled_at)).scalars().all()
         snap_n, snap_lo, snap_hi = s.execute(
@@ -312,7 +341,8 @@ def leg_detail(leg_id: int, user: CurrentUser = Depends(require_admin)) -> dict:
 
     def sname(sid):
         st = strat.get(sid)
-        return {"id": sid, "name": st.name if st else None, "color": (st.color if st else None)}
+        return {"id": sid, "name": _box_name(st), "color": (st.color if st else None),
+                "deleted": bool(st and st.deleted_at is not None)}
 
     history = [{"action": h.action, "strategy": sname(h.strategy_id) if h.strategy_id else None,
                 "prev_strategy": sname(h.prev_strategy_id) if h.prev_strategy_id else None,
@@ -345,8 +375,9 @@ def history(subaccount: int, user: CurrentUser = Depends(require_admin)) -> dict
     with SessionLocal() as s:
         rows = s.execute(select(StrategyLink).where(StrategyLink.subaccount_id == subaccount)
                          .order_by(StrategyLink.id.desc())).scalars().all()
-        names = _user_names(s, [r.created_by for r in rows])
-        strat = {st.id: st for st in _strategies(s, subaccount)}
+        strat = {st.id: st for st in _strategies(s, subaccount, include_deleted=True)}
+        deleted = [st for st in strat.values() if st.deleted_at is not None]
+        names = _user_names(s, [r.created_by for r in rows] + [st.deleted_by for st in deleted])
     sets: dict[str, dict] = {}
     for r in rows:
         cs = sets.setdefault(r.changeset_id, {
@@ -356,14 +387,23 @@ def history(subaccount: int, user: CurrentUser = Depends(require_admin)) -> dict
         cs["n_rows"] += 1
         cs["n_current"] += 1 if r.superseded_at is None else 0
         cs["actions"][r.action] += 1
-        tgt = strat[r.strategy_id].name if r.strategy_id in strat else "rules"
+        tgt = _box_name(strat[r.strategy_id]) if r.strategy_id in strat else "rules"
         cs["targets"][tgt] += 1
         if len(cs["legs"]) < 6:
             cs["legs"].append(r.inst_id)
+    # "box deleted" changesets: Undo restores the box (also when it held no legs → no link rows)
+    for st in deleted:
+        if not st.deleted_changeset_id:
+            continue
+        cs = sets.setdefault(st.deleted_changeset_id, {
+            "changeset_id": st.deleted_changeset_id, "created_at": _iso(st.deleted_at),
+            "created_by": names.get(st.deleted_by), "reason": f"Box '{st.name}' deleted",
+            "n_rows": 0, "n_current": 0, "actions": {}, "targets": {}, "legs": []})
+        cs["deleted_box"] = {"id": st.id, "name": st.name, "color": st.color}
     out = []
     for cs in sets.values():
         cs["actions"], cs["targets"] = dict(cs["actions"]), dict(cs["targets"])
-        cs["undoable"] = cs["n_current"] > 0
+        cs["undoable"] = cs["n_current"] > 0 or "deleted_box" in cs
         out.append(cs)
     out.sort(key=lambda c: c["created_at"] or "", reverse=True)
     return {"changesets": out}
@@ -410,6 +450,21 @@ class StrategyIn(BaseModel):
     name: str
     color: str | None = None
     description: str | None = None
+
+
+class StrategyEditIn(BaseModel):
+    name: str
+    color: str | None = None
+    description: str | None = None
+
+
+def _valid_name(raw: str | None) -> str:
+    name = (raw or "").strip()
+    if not name or len(name) > 64:
+        raise HTTPException(422, "Name is required (max 64 characters)")
+    if name.lower() == UNASSIGNED:
+        raise HTTPException(422, f"'{UNASSIGNED}' is reserved for the fallback box")
+    return name
 
 
 def _validate_moves(s, user: CurrentUser, body: MovesIn) -> tuple[dict, dict, list[Move]]:
@@ -552,15 +607,27 @@ def undo(body: UndoIn, user: CurrentUser = Depends(require_admin)) -> dict:
     """Revert a changeset: each of its links that is still current goes back to the state before
     it (the previous pin, or the rules). Links already replaced by a later change are skipped."""
     changeset_id, now = str(uuid.uuid4()), datetime.now(timezone.utc)
-    written, skipped = 0, []
+    written, skipped, restored = 0, [], None
     with SessionLocal() as s, s.begin():
         rows = s.execute(select(StrategyLink).where(
             StrategyLink.changeset_id == body.changeset_id)).scalars().all()
-        if not rows:
+        box = s.execute(select(Strategy).where(
+            Strategy.deleted_changeset_id == body.changeset_id)).scalar_one_or_none()
+        if not rows and box is None:
             raise HTTPException(404, "Unknown changeset")
-        _check_sub(user, rows[0].subaccount_id)
+        sub_id = rows[0].subaccount_id if rows else box.subaccount_id
+        _check_sub(user, sub_id)
         reason = f"Undo of changeset {body.changeset_id[:8]}" + (
             f": {body.reason.strip()}" if body.reason and body.reason.strip() else "")
+        if box is not None and box.deleted_at is not None:
+            # undo of "box deleted": bring the box (and so its rules) back before re-pinning legs
+            if _name_taken(s, sub_id, box.name):
+                box.name = (box.name[:53] + " (restored)")
+            box.deleted_at = box.deleted_by = box.deleted_changeset_id = None
+            restored = box.name
+            s.flush()
+        deleted_ids = {st.id for st in _strategies(s, sub_id, include_deleted=True)
+                       if st.deleted_at is not None}
         for r in rows:
             if r.superseded_at is not None:
                 skipped.append(r.inst_id)
@@ -579,6 +646,9 @@ def undo(body: UndoIn, user: CurrentUser = Depends(require_admin)) -> dict:
                 continue
             if prev is not None and prev.action == PIN:
                 action, sid = PIN, prev.strategy_id
+                if sid in deleted_ids:              # can't pin back into a deleted box
+                    skipped.append(r.inst_id)
+                    continue
             else:
                 action, sid = UNPIN, None
             cur_sid = r.strategy_id if r.action == PIN else leg.strategy_id
@@ -592,13 +662,14 @@ def undo(body: UndoIn, user: CurrentUser = Depends(require_admin)) -> dict:
                 created_by=user.id, created_at=now))
             s.flush()
             written += 1
-        if written:
+        if written or restored:
             _audit(s, user.id, "box_builder.undo",
-                   f"changeset={changeset_id} undoes={body.changeset_id} rows={written}")
-    if written:
+                   f"changeset={changeset_id} undoes={body.changeset_id} rows={written}"
+                   + (f" restored_box={restored}" if restored else ""))
+    if written or restored:
         request_recompute()
     return {"changeset_id": changeset_id if written else None, "written": written,
-            "skipped": skipped, "recompute": _rc_status()}
+            "skipped": skipped, "restored_box": restored, "recompute": _rc_status()}
 
 
 @router.post("/strategies")
@@ -606,15 +677,10 @@ def create_strategy(body: StrategyIn, user: CurrentUser = Depends(require_admin)
     """Create a strategy ("box" in the GUI) in the account. Lives in the DB only — add it to
     seed/strategy.csv to keep it in git."""
     _check_sub(user, body.subaccount_id)
-    name = (body.name or "").strip()
-    if not name or len(name) > 64:
-        raise HTTPException(422, "Name is required (max 64 characters)")
+    name = _valid_name(body.name)
     color = body.color if body.color and _HEX.match(body.color) else "#9b7be0"
     with SessionLocal() as s, s.begin():
-        exists = s.execute(select(Strategy.id).where(
-            Strategy.subaccount_id == body.subaccount_id,
-            func.lower(Strategy.name) == name.lower())).first()
-        if exists:
+        if _name_taken(s, body.subaccount_id, name):
             raise HTTPException(409, f"Box '{name}' already exists in this account")
         st = Strategy(subaccount_id=body.subaccount_id, name=name, color=color,
                       description=(body.description or "").strip() or None)
@@ -623,3 +689,60 @@ def create_strategy(body: StrategyIn, user: CurrentUser = Depends(require_admin)
         _audit(s, user.id, "box_builder.create_strategy",
                f"strategy={st.id} subaccount={body.subaccount_id} name={name}")
         return {"id": st.id, "name": st.name, "color": st.color}
+
+
+@router.put("/strategies/{strategy_id}")
+def update_strategy(strategy_id: int, body: StrategyEditIn,
+                    user: CurrentUser = Depends(require_admin)) -> dict:
+    """Edit a box: name, color, description. Legs, pins and rules are untouched; reports read the
+    name live from core.strategy, so no recompute is needed."""
+    with SessionLocal() as s, s.begin():
+        st = _active_box(s, user, strategy_id)
+        if st.name == UNASSIGNED:
+            raise HTTPException(422, f"The '{UNASSIGNED}' box can't be edited")
+        name = _valid_name(body.name)
+        if _name_taken(s, st.subaccount_id, name, except_id=st.id):
+            raise HTTPException(409, f"Box '{name}' already exists in this account")
+        old = st.name
+        st.name = name
+        if body.color and _HEX.match(body.color):
+            st.color = body.color
+        st.description = (body.description or "").strip() or None
+        _audit(s, user.id, "box_builder.update_strategy",
+               f"strategy={st.id} subaccount={st.subaccount_id} name={old}->{name}")
+        return {"id": st.id, "name": st.name, "color": st.color, "description": st.description}
+
+
+@router.delete("/strategies/{strategy_id}")
+def delete_strategy(strategy_id: int, user: CurrentUser = Depends(require_admin)) -> dict:
+    """Delete a box: pin every leg it holds to the account's `unassigned` box (one changeset), then
+    soft-delete it (its rules stop applying). Undo of the changeset in History restores the box."""
+    changeset_id, now, moved = str(uuid.uuid4()), datetime.now(timezone.utc), 0
+    with SessionLocal() as s, s.begin():
+        st = _active_box(s, user, strategy_id)
+        if st.name == UNASSIGNED:
+            raise HTTPException(422, f"The '{UNASSIGNED}' box can't be deleted")
+        unassigned = s.execute(select(Strategy).where(
+            Strategy.subaccount_id == st.subaccount_id, Strategy.name == UNASSIGNED,
+            Strategy.deleted_at.is_(None))).scalar_one_or_none()
+        if unassigned is None:
+            raise HTTPException(409, f"This account has no '{UNASSIGNED}' box to move the legs to")
+        legs = _load_legs(s, st.subaccount_id)
+        links = _current_links(s, st.subaccount_id)
+        reason = f"Box '{st.name}' deleted — its legs moved to {UNASSIGNED}"
+        for lg in legs:
+            if lg["strategy_id"] != st.id:             # effective box (pending pins included)
+                continue
+            leg, key = _leg_key(s, lg["id"])
+            moved += _write_link(s, user.id, leg, links.get(key), PIN, unassigned.id, st.id,
+                                 changeset_id, reason, now)
+        n_rules = s.execute(select(func.count()).select_from(StrategyRule).where(
+            StrategyRule.strategy_id == st.id)).scalar_one()
+        st.deleted_at, st.deleted_by, st.deleted_changeset_id = now, user.id, changeset_id
+        _audit(s, user.id, "box_builder.delete_strategy",
+               f"strategy={st.id} name={st.name} changeset={changeset_id} legs={moved} "
+               f"rules_disabled={n_rules}")
+        name = st.name
+    request_recompute()
+    return {"changeset_id": changeset_id, "name": name, "moved": moved,
+            "rules_disabled": n_rules, "recompute": _rc_status()}

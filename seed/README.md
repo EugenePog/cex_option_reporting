@@ -42,6 +42,11 @@ python -m app.cli seed --replace         # truncate the seed tables first, then 
 - **Strategies created in the Box builder** (`+ New box` — a box is a strategy) live only in the database. Add them
   to `strategy.csv` (with their DB `id`) to keep them in git — a CSV row reusing the same `id` for
   something else would overwrite them on the next seed.
+- **Boxes edited or deleted in the Box builder** (✎): a rename / recolor in the GUI is overwritten by
+  the next `seed` if the box is in `strategy.csv` — change it there too. A **deleted** box is a soft
+  delete (`deleted_at`, migration 0018): `seed` (upsert) does not bring it back because `deleted_at`
+  is not a CSV column, but `seed --replace --wipe-links` does. Remove it (and its `strategy_rule.csv`
+  rows) from the CSVs to drop it for good. Never delete the `unassigned` row of a subaccount.
 
 ## Allowed values (data dictionary)
 

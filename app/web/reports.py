@@ -88,7 +88,8 @@ def filters(user: CurrentUser = Depends(get_current_user)) -> dict:
             {"id": sid, "name": name, "color": color}
             for sid, name, color in s.execute(
                 select(Strategy.id, Strategy.name, Strategy.color)
-                .where(Strategy.subaccount_id.in_(subs)).order_by(Strategy.name)
+                .where(Strategy.subaccount_id.in_(subs), Strategy.deleted_at.is_(None))
+                .order_by(Strategy.name)
             )
         ]
         assets = sorted({c for (c,) in s.execute(

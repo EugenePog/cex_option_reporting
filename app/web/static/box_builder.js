@@ -45,8 +45,11 @@ function legLabel(lg) {
   return `${coin}${cp} ${fmtDM(lg.expiry)} ${lg.strike != null ? kTxt(lg.strike) : ""}`.replace(/\s+/g, " ").trim();
 }
 
-async function post(path, body) {
-  const r = await fetch("/api" + path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+async function post(path, body) { return send("POST", path, body); }
+async function send(method, path, body) {
+  const opt = {method, headers: {"Content-Type": "application/json"}};
+  if (body !== undefined) opt.body = JSON.stringify(body);
+  const r = await fetch("/api" + path, opt);
   if (r.status === 401) { location.href = "/login"; return null; }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.detail ? (typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail)) : r.status);
@@ -111,8 +114,9 @@ async function boot() {
   for (const b of $("bb-view").querySelectorAll("button")) b.onclick = () => setView(b.dataset.view);
   $("sel-all").onchange = e => { S.selected = e.target.checked ? new Set(S.shown) : new Set(); render(); };
   $("btn-moveto").onclick = (e) => { e.stopPropagation(); toggleMoveMenu(); };
-  $("btn-newstrat").onclick = openNewStrategy;
-  $("ns-save").onclick = saveNewStrategy;
+  $("btn-newstrat").onclick = () => openStratDlg(null);
+  $("ns-save").onclick = saveStrategy;
+  $("ns-delete").onclick = deleteStrategy;
   $("pend-undo").onclick = undoStage;
   $("pend-discard").onclick = () => { resetStage(); render(); };
   $("pend-review").onclick = openReview;
@@ -189,7 +193,7 @@ function render() {
 function legRow(lg) {
   const sel = S.selected.has(lg.id), sid = effSid(lg);
   return `<div class="bb-row ${sel ? "sel" : ""} ${S.staged.has(lg.id) ? "staged" : ""}" draggable="true" data-legs="${lg.id}" data-leg="${lg.id}">
-    <span><input type="checkbox" class="cb" data-leg="${lg.id}" ${sel ? "checked" : ""}></span>
+    <span class="bb-hit" data-pick="${lg.id}"><input type="checkbox" class="cb" data-leg="${lg.id}" ${sel ? "checked" : ""}></span>
     <span class="inst" title="${esc(lg.inst_id)} · posId ${esc(lg.pos_id)}">${esc(lg.inst_id)}</span>
     <span>${sideChip(lg)}</span>
     <span class="t">${openedClosed(lg)}</span>
@@ -204,14 +208,16 @@ function renderLegs() {
     return;
   }
   body.innerHTML = S.shown.map(id => legRow(S.legs[id])).join("");
-  body.querySelectorAll("input.cb").forEach(cb => cb.onclick = (e) => {
-    e.stopPropagation();
-    const id = +cb.dataset.leg;
+  // the whole .bb-hit cell (2× the checkbox width, full row height) toggles the leg; a click on the
+  // checkbox itself lands here too (preventDefault: the state comes from S.selected on re-render)
+  body.querySelectorAll(".bb-hit").forEach(h => h.onclick = (e) => {
+    e.stopPropagation(); e.preventDefault();
+    const id = +h.dataset.pick;
     if (e.shiftKey && S.lastClicked != null) {
       const a = S.shown.indexOf(S.lastClicked), b = S.shown.indexOf(id);
       for (const x of S.shown.slice(Math.min(a, b), Math.max(a, b) + 1)) S.selected.add(x);
     } else {
-      cb.checked ? S.selected.add(id) : S.selected.delete(id);
+      S.selected.has(id) ? S.selected.delete(id) : S.selected.add(id);
     }
     S.lastClicked = id;
     render();
@@ -265,8 +271,9 @@ function renderCols() {
     const rules = st.rules.length ? `rule${st.rules.length > 1 ? "s" : ""} ${st.rules.map(r => "#" + r.id + " " + esc(Object.values(r.match || {}).join(" "))).join(", ")}`
       : st.is_unassigned ? "no rule matched" : "manual only";
     const limit = S.showAll.has(st.id) ? 1e9 : 6;
+    const edit = st.is_unassigned ? "" : `<button type="button" class="bb-edit" data-edit="${st.id}" title="Rename, recolor or delete this box" aria-label="Edit box ${esc(st.name)}"><svg viewBox="0 0 16 16" width="13" height="13"><path d="M11.3 1.7a1.6 1.6 0 0 1 2.3 0l.7.7a1.6 1.6 0 0 1 0 2.3L5.6 13.4 2 14l.6-3.6z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M10 3l3 3" stroke="currentColor" stroke-width="1.4"/></svg></button>`;
     h += `<div class="bb-col" data-drop="${st.id}">
-      <h3><i class="dot" style="background:${esc(st.color)}"></i>${esc(st.name)}</h3>
+      <h3><i class="dot" style="background:${esc(st.color)}"></i><span class="bn" title="${esc(st.description || st.name)}">${esc(st.name)}</span>${edit}</h3>
       <div class="meta">${k.n} legs · ${rules}</div>
       <div class="kp"><div>NET P&amp;L<b class="${pnlCls(k.pnl)}">${moneyK(k.pnl)}</b></div>
         <div>WIN<b>${st.win_rate == null ? "—" : Math.round(st.win_rate * 100) + "%"}</b></div><div>OPEN<b>${k.open}</b></div></div>
@@ -288,6 +295,7 @@ function renderCols() {
   cols.innerHTML = h;
   cols.querySelectorAll("[data-more]").forEach(m => m.onclick = () => { S.showAll.add(+m.dataset.more); renderCols(); });
   cols.querySelectorAll(".card2").forEach(c => c.onclick = () => openLeg(+c.dataset.leg));
+  cols.querySelectorAll("[data-edit]").forEach(b => b.onclick = (e) => { e.stopPropagation(); openStratDlg(S.strats[+b.dataset.edit]); });
   wireDrag(cols);
   cols.querySelectorAll("[data-drop]").forEach(col => {
     col.ondragover = (e) => { e.preventDefault(); col.classList.add("target"); };
@@ -363,9 +371,10 @@ async function loadHistory() {
     <div class="bb-cs">
       <div class="l1"><b>${fmtTs(cs.created_at)}</b><span class="muted">· ${esc(cs.created_by || "?")} · ${cs.n_rows} leg${cs.n_rows > 1 ? "s" : ""}</span>
         <span class="spacer" style="flex:1"></span>
-        ${cs.undoable ? `<button type="button" class="bb-btn ghost" data-undo="${cs.changeset_id}">Undo</button>` : `<span class="muted bb-small">superseded</span>`}</div>
+        ${cs.undoable ? `<button type="button" class="bb-btn ghost" data-undo="${cs.changeset_id}">${cs.deleted_box ? "Undo · restore box" : "Undo"}</button>` : `<span class="muted bb-small">superseded</span>`}</div>
       <div class="l2">“${esc(cs.reason)}”</div>
-      <div class="l3">${Object.entries(cs.targets).map(([t, c]) => `<span class="chip ${t === "rules" ? "rule" : "pin"}">${c} → ${esc(t)}</span>`).join(" ")}
+      <div class="l3">${cs.deleted_box ? `<span class="chip del"><i class="dot" style="background:${esc(cs.deleted_box.color || "#888")}"></i>box deleted · ${esc(cs.deleted_box.name)}</span>` : ""}
+        ${Object.entries(cs.targets).map(([t, c]) => `<span class="chip ${t === "rules" ? "rule" : "pin"}">${c} → ${esc(t)}</span>`).join(" ")}
         <span class="muted bb-small">${cs.legs.map(esc).join(", ")}${cs.n_rows > cs.legs.length ? "…" : ""}</span>
         <span class="muted bb-small mono">#${cs.changeset_id.slice(0, 8)}</span></div>
     </div>`).join("");
@@ -374,7 +383,7 @@ async function loadHistory() {
     b.disabled = true;
     try {
       const r = await post(BB + "/undo", {changeset_id: b.dataset.undo});
-      toast(`Undone: ${r.written} leg(s) restored${r.skipped.length ? ` · ${r.skipped.length} skipped (changed later)` : ""}. Recomputing…`, "ok");
+      toast(`Undone: ${r.written} leg(s) restored${r.restored_box ? ` · box “${r.restored_box}” is back` : ""}${r.skipped.length ? ` · ${r.skipped.length} skipped (changed later or box deleted)` : ""}. Recomputing…`, "ok");
       startPolling(); await load(); loadHistory();
     } catch (err) { toast("Undo failed: " + err.message, "bad"); b.disabled = false; }
   });
@@ -500,17 +509,64 @@ async function openLeg(id) {
   openDlg("dlg-leg");
 }
 
-// ------------------------------------------------------------------ new box (core.strategy)
-function openNewStrategy() {
-  $("ns-acct").textContent = (S.subs.find(s => s.id === S.sub) || {}).label || "";
-  $("ns-name").value = ""; $("ns-desc").value = ""; $("ns-err").hidden = true;
+// ------------------------------------------------------------------ new / edit / delete box (core.strategy)
+let NS = {id: null, armed: false};          // id = box being edited (null = new box)
+function openStratDlg(st) {
+  NS = {id: st ? st.id : null, armed: false};
+  const acct = esc((S.subs.find(s => s.id === S.sub) || {}).label || "");
+  $("ns-title").textContent = st ? "Edit box" : "New box";
+  $("ns-sub").innerHTML = st
+    ? `Box in <b>${acct}</b>. Renaming keeps every leg, pin and rule; reports show the new name right away.`
+    : `Creates a box in <b>${acct}</b>. It lives in the database — add it to <code>seed/strategy.csv</code> to keep it in git.`;
+  $("ns-name").value = st ? st.name : "";
+  $("ns-color").value = st && /^#[0-9a-f]{6}$/i.test(st.color || "") ? st.color : "#9b7be0";
+  $("ns-desc").value = st ? (st.description || "") : "";
+  $("ns-save").textContent = st ? "Save" : "Create";
+  $("ns-save").disabled = false;
+  const del = $("ns-delete");
+  del.hidden = !st; del.disabled = false; del.textContent = "Delete box…"; del.classList.remove("armed");
+  $("ns-del-confirm").hidden = true; $("ns-err").hidden = true;
   openDlg("dlg-strat"); setTimeout(() => $("ns-name").focus(), 30);
 }
-async function saveNewStrategy() {
+async function saveStrategy() {
+  const body = {name: $("ns-name").value, color: $("ns-color").value, description: $("ns-desc").value};
+  $("ns-save").disabled = true;
   try {
-    const r = await post(BB + "/strategies", {subaccount_id: S.sub, name: $("ns-name").value, color: $("ns-color").value, description: $("ns-desc").value});
-    closeDlg("dlg-strat"); toast(`Box “${r.name}” created — drop legs on it.`, "ok"); await load();
+    if (NS.id) {
+      const r = await send("PUT", BB + "/strategies/" + NS.id, body);
+      closeDlg("dlg-strat"); toast(`Box “${r.name}” saved.`, "ok");
+    } else {
+      const r = await post(BB + "/strategies", {subaccount_id: S.sub, ...body});
+      closeDlg("dlg-strat"); toast(`Box “${r.name}” created — drop legs on it.`, "ok");
+    }
+    await load();
   } catch (err) { $("ns-err").textContent = err.message; $("ns-err").hidden = false; }
+  finally { $("ns-save").disabled = false; }
+}
+async function deleteStrategy() {
+  const st = S.strats[NS.id]; if (!st) return;
+  const del = $("ns-delete");
+  if (!NS.armed) {                                   // 1st click: explain, 2nd click: delete
+    const n = S.data.legs.filter(l => l.strategy_id === st.id).length;
+    const r = st.rules.length;
+    $("ns-del-confirm").innerHTML = `<b>Delete box “${esc(st.name)}”?</b> Its <b>${n} leg${n === 1 ? "" : "s"}</b> move to
+      <b>unassigned</b> (pinned there)${r ? `, and its ${r} rule${r === 1 ? "" : "s"} stop${r === 1 ? "s" : ""} applying` : ""}.
+      Reports follow after the recompute. You can undo this in <b>History</b> (restores the box).`;
+    $("ns-del-confirm").hidden = false;
+    NS.armed = true; del.classList.add("armed");
+    del.textContent = `Delete · move ${n} leg${n === 1 ? "" : "s"} to unassigned`;
+    return;
+  }
+  del.disabled = true;
+  try {
+    const r = await send("DELETE", BB + "/strategies/" + st.id);
+    closeDlg("dlg-strat");
+    // staged moves into the deleted box are dropped
+    for (const [id, to] of [...S.staged]) if (to === st.id) S.staged.delete(id);
+    S.batches = S.batches.map(b => b.filter(x => S.staged.has(x.leg_id))).filter(b => b.length);
+    toast(`Box “${r.name}” deleted — ${r.moved} leg${r.moved === 1 ? "" : "s"} moved to unassigned. Undo in History.`, "ok");
+    await load(); startPolling();
+  } catch (err) { $("ns-err").textContent = err.message; $("ns-err").hidden = false; del.disabled = false; }
 }
 
 boot();

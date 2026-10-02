@@ -77,6 +77,15 @@ class Subaccount(Base):
 
 
 class Strategy(Base):
+    """A strategy — shown as a *box* in the admin Box builder.
+
+    Deleting a box is a soft delete (`deleted_at`, 0018): its legs are pinned to the account's
+    `unassigned` box in changeset `deleted_changeset_id`, its strategy_rule rows stop applying, and
+    it disappears from the GUI; the row stays so silver/gold/pin history keep valid FKs and Undo of
+    that changeset can restore it. The `unassigned` box itself can't be renamed or deleted (the
+    pipeline finds it by name).
+    """
+
     __tablename__ = "strategy"
     __table_args__ = (
         # target of strategy_link's composite FK (strategy must belong to the leg's subaccount)
@@ -90,6 +99,11 @@ class Strategy(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     color: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # soft delete (0018) — NULL = active
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("core.user.id", name="fk_strategy_deleted_by_user"), nullable=True)
+    deleted_changeset_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
 
 
 class StrategyRule(Base):

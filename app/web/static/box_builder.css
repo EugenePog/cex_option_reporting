@@ -45,6 +45,8 @@
 .chip.short{background:#3a1715;color:#f58a84}
 .chip.long{background:#0f2a1a;color:#5fd38a}
 .chip.out{border:1px solid #444b57;color:#c7cdd6}
+.chip.del{background:#2a1416;color:#f7a6a6;border:1px solid #5b1e22}
+.chip.del .dot{width:7px;height:7px;margin-right:5px}
 b.open{color:#8cc2ff}
 
 /* sync banner */
@@ -62,6 +64,11 @@ b.open{color:#8cc2ff}
 .bb-th,.bb-row{display:grid;grid-template-columns:20px minmax(0,1fr) 64px 122px 62px 132px;gap:6px;align-items:center}
 .bb-th{color:var(--muted);font-size:10px;letter-spacing:.6px;font-weight:700;text-transform:uppercase;padding:4px 4px;border-bottom:1px solid var(--border)}
 .bb-th input,.bb-row input{min-width:auto;width:auto;accent-color:var(--blue);margin:0}
+/* checkbox hit area: 2× the checkbox width (26px) and the full row height. Negative margins and equal
+   padding grow the clickable box into the row padding / grid gap, so the checkbox doesn't move. */
+.bb-row .bb-hit,.bb-th .bb-hit{display:block;align-self:stretch;cursor:pointer;
+  margin:-5px -2px -5px -4px;padding:5px 2px 5px 4px}
+.bb-th .bb-hit{margin:-4px -2px -4px -4px;padding:4px 2px 4px 4px}
 .bb-legs-body{max-height:calc(100vh - 360px);min-height:240px;overflow:auto}
 .bb-row{padding:5px 4px;font-size:12px;border-bottom:1px solid var(--border);cursor:grab}
 .bb-row:hover{background:var(--panel2)}
@@ -81,7 +88,11 @@ b.open{color:#8cc2ff}
 .bb-board{min-width:0}
 .bb-cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
 .bb-col{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:10px 11px;position:relative;min-height:300px;display:flex;flex-direction:column}
-.bb-col h3{font-size:13.5px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bb-col h3{font-size:13.5px;margin:0;display:flex;align-items:center;min-width:0}
+.bb-col h3 .bn{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bb-edit{flex:none;margin-left:6px;background:transparent;border:1px solid transparent;border-radius:6px;color:var(--muted);
+  padding:2px 4px;line-height:0;cursor:pointer}
+.bb-edit:hover,.bb-edit:focus-visible{color:var(--text);border-color:var(--border);background:var(--panel2)}
 .bb-col .meta{color:var(--muted);font-size:11px;margin:3px 0 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bb-col .kp{display:flex;gap:14px;margin-bottom:6px}
 .bb-col .kp div{font-size:10px;color:var(--muted);letter-spacing:.4px}
@@ -157,6 +168,8 @@ table.bb-rv td{white-space:nowrap}
 .bb-form input{width:100%}
 .bb-form input[type=color]{padding:2px;height:34px;width:70px;min-width:70px}
 .bb-dialog .err{margin:10px 0 0}
+.bb-danger{margin-top:12px;background:#24141a;border:1px solid #5b1e22;color:#f1c9c9;border-radius:9px;padding:9px 11px;font-size:12.5px;line-height:1.45}
+.bb-btn.danger.armed{background:#7a2a2a;border-color:#a33b3b;color:#fff}
 
 /* leg drawer */
 .bb-drawer{position:relative;width:min(540px,100%);height:100%;overflow:auto;background:#161a20;border-left:1px solid #333b47;padding:18px 20px;

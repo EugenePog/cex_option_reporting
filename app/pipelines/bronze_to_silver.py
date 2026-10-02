@@ -84,22 +84,28 @@ class _Lookups:
             self.subaccount[(cex_code, label, subacct_name or "")] = sub_id
 
         # subaccount_id -> [Rule], and subaccount_id -> unassigned strategy_id
+        # rules of deleted boxes (core.strategy.deleted_at, 0018) no longer apply
         self.rules: dict[int, list[Rule]] = {}
-        for r in session.execute(select(StrategyRule)).scalars():
+        for r in session.execute(
+            select(StrategyRule).join(Strategy, Strategy.id == StrategyRule.strategy_id)
+            .where(Strategy.deleted_at.is_(None))
+        ).scalars():
             self.rules.setdefault(r.subaccount_id, []).append(
                 Rule(strategy_id=r.strategy_id, priority=r.priority, match_json=r.match_json or {})
             )
         self.unassigned: dict[int, int] = {}
         for s in session.execute(
-            select(Strategy).where(Strategy.name == "unassigned")
+            select(Strategy).where(Strategy.name == "unassigned", Strategy.deleted_at.is_(None))
         ).scalars():
             self.unassigned[s.subaccount_id] = s.id
 
         # current manual pins: leg key -> (strategy_link.id, strategy_id). Highest precedence.
         self.pins: dict[LegKey, tuple[int, int]] = {}
+        # (a pin to a deleted box is ignored → rules decide; deleting a box re-pins its legs first)
         for link in session.execute(
-            select(StrategyLink).where(StrategyLink.superseded_at.is_(None),
-                                       StrategyLink.action == "pin")
+            select(StrategyLink).join(Strategy, Strategy.id == StrategyLink.strategy_id)
+            .where(StrategyLink.superseded_at.is_(None), StrategyLink.action == "pin",
+                   Strategy.deleted_at.is_(None))
         ).scalars():
             key = (link.cex_code, link.subaccount_id, link.pos_id, link.pos_opened_at)
             self.pins[key] = (link.id, link.strategy_id)

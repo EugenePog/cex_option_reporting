@@ -45,7 +45,7 @@
       <div class="fld bb-find"><label>Find</label><input id="f-q" placeholder="inst_id or posId…"></div>
       <button type="button" class="bb-btn ghost bb-clear" id="f-clear" hidden>Clear filters</button>
     </div>
-    <div class="bb-th" id="legs-th"><span><input type="checkbox" id="sel-all" title="Select all shown"></span><span>Leg</span><span>Side</span><span>Opened → closed</span><span class="r">P&amp;L</span><span>Box</span></div>
+    <div class="bb-th" id="legs-th"><label class="bb-hit" title="Select all shown"><input type="checkbox" id="sel-all"></label><span>Leg</span><span>Side</span><span>Opened → closed</span><span class="r">P&amp;L</span><span>Box</span></div>
     <div id="legs-body" class="bb-legs-body"></div>
     <div class="bb-foot muted">Drag a leg onto a box · dragging a selected leg moves the whole selection · shift-click to range-select · <b>M</b> = move selection</div>
   </div>
@@ -115,19 +115,23 @@
   </div>
 </div>
 
-<!-- ======================= NEW BOX (core.strategy) ======================= -->
+<!-- ======================= NEW / EDIT BOX (core.strategy) ======================= -->
+<!-- "+ New box" opens it empty; the ✎ on a box opens it prefilled, with Delete. -->
 <div class="bb-overlay" id="dlg-strat" hidden>
-  <div class="bb-dialog bb-small-dlg" role="dialog">
+  <div class="bb-dialog bb-small-dlg" role="dialog" aria-labelledby="ns-title">
     <button type="button" class="bb-x" data-close>✕</button>
-    <h2>New box</h2>
-    <div class="sub">Creates a box in <b id="ns-acct"></b>. It lives in the database — add it to <code>seed/strategy.csv</code> to keep it in git.</div>
+    <h2 id="ns-title">New box</h2>
+    <div class="sub" id="ns-sub"></div>
     <div class="bb-form">
       <label>Name<input id="ns-name" maxlength="64" placeholder="e.g. weekend-straddle"></label>
       <label>Color<input id="ns-color" type="color" value="#9b7be0"></label>
       <label>Description<input id="ns-desc" placeholder="optional"></label>
     </div>
+    <div class="bb-danger" id="ns-del-confirm" hidden></div>
     <div class="err" id="ns-err" hidden></div>
-    <div class="bb-dfoot"><span class="spacer" style="flex:1"></span>
+    <div class="bb-dfoot">
+      <button type="button" class="bb-btn danger" id="ns-delete" hidden>Delete box…</button>
+      <span class="spacer" style="flex:1"></span>
       <button type="button" class="bb-btn ghost" data-close>Cancel</button>
       <button type="button" class="bb-btn primary" id="ns-save">Create</button></div>
   </div>

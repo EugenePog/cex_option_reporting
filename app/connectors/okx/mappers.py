@@ -13,6 +13,7 @@ from app.connectors.base import (
     BillRow,
     ClosedPositionRow,
     FillRow,
+    IndexCandleRow,
     MarginInfo,
     OptionSummaryRow,
     PositionRow,
@@ -30,6 +31,23 @@ def _f(val: Any, default: float = 0.0) -> float:
         return float(val)
     except (TypeError, ValueError):
         return default
+
+
+def map_index_candles(resp: dict[str, Any], inst_id: str, bar: str) -> list[IndexCandleRow]:
+    """OKX index candles -> rows. Each item is ["ts","o","h","l","c","confirm"] (strings, newest
+    first). Index candles carry no volume; `confirm` is the last element ("1" = completed)."""
+    rows: list[IndexCandleRow] = []
+    for item in resp.get("data") or []:
+        if not item or len(item) < 5:
+            continue
+        rows.append(IndexCandleRow(
+            inst_id=inst_id, bar=bar,
+            ts=datetime.fromtimestamp(int(item[0]) / 1000, tz=timezone.utc),
+            open=_f(item[1]), high=_f(item[2]), low=_f(item[3]), close=_f(item[4]),
+            confirmed=(str(item[-1]) == "1") if len(item) >= 6 else True,
+            raw=list(item),
+        ))
+    return rows
 
 
 def uly_from_inst_id(inst_id: str) -> str:

@@ -127,13 +127,21 @@ make collect-snapshot-loop       # == python -m app.cli snapshot --loop
 # Scheduler fires once/day at INGEST_TIME_UTC (default 10:00 UTC):
 make collect-loop                # == python -m app.cli history --loop
 
-# Backfill — one-off, full available history depth (also snapshots current state):
-make backfill                    # == python -m app.cli backfill
+# Backfill — one-off, full available history depth (also snapshots current state), then the
+# BTC-USD 1-minute index candles from the day of the earliest open/closed position:
+make backfill                    # == python -m app.cli backfill   (--no-candles to skip candles)
 ```
 
 For a quick manual pass without the scheduler: `python -m app.cli snapshot` or `python -m app.cli history`.
 
-Check what landed (note the `mode` column: snapshot | history | backfill):
+**BTC-USD index candles** (`bronze.raw_index_candle`, OKX public `history-index-candles`, no API key):
+both loops (and the one-shot `snapshot` / `history`) top them up after the accounts at their usual
+times; `make backfill` fills them from the earliest position. Only missing minutes are fetched
+(≤100 per request, ~9 requests / 2 s), so the first backfill of ~3 months takes a few minutes.
+Re-run or extend just the candles with `python -m app.cli index-candles [--since 2026-01-01]`.
+Instruments: `INDEX_CANDLE_INST_IDS` (default `BTC-USD`; empty = off).
+
+Check what landed (note the `mode` column: snapshot | history | backfill | candles | candles_backfill):
 
 ```bash
 docker exec -it cex_pg psql -U cex -d cex_option_reporting \
@@ -209,6 +217,19 @@ pm2 start ecosystem.config.js
 ```bash
 make migrate                      # 0018: core.strategy.deleted_at / deleted_by / deleted_changeset_id
 pm2 restart pipeline web          # new code ignores rules of deleted boxes; ✎ edit / delete in the UI
+```
+
+### 10d. BTC-USD index candles (migration 0019)
+
+```bash
+make migrate                      # 0019: bronze.raw_index_candle
+python -m app.cli index-candles   # first fill: from the day of the earliest position (or: make backfill)
+pm2 restart collector-snapshot collector-history   # loops now top up the candles at their times
+```
+
+```bash
+docker exec -it cex_pg psql -U cex -d cex_option_reporting \
+  -c "select inst_id, count(*), min(ts), max(ts) from bronze.raw_index_candle group by 1;"
 ```
 
 ---

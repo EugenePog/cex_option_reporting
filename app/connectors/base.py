@@ -142,6 +142,25 @@ class ClosedPositionRow:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class IndexCandleRow:
+    """One index-price candle (public market data, not account data), e.g. BTC-USD at 1m.
+
+    `ts` is the candle OPEN time. Dedup key in bronze is (cex_code, inst_id, bar, ts). Only
+    `confirmed` (completed) candles are stored — the current, still-moving minute is skipped.
+    """
+
+    inst_id: str                  # index, e.g. "BTC-USD"
+    bar: str                      # "1m"
+    ts: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    confirmed: bool               # OKX confirm: "1" completed, "0" still forming
+    raw: list[Any] = field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # The interface
 # --------------------------------------------------------------------------- #

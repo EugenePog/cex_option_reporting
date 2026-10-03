@@ -96,6 +96,14 @@ class Settings(BaseSettings):
 
     okx_k_account_label: str = Field(default="OKX_K", alias="OKX_K_ACCOUNT_LABEL")  # tag stored on bronze rows
 
+    # Index candles (OKX market/history-index-candles, 1-minute bars) -> bronze.raw_index_candle.
+    # Comma-separated OKX index ids; empty disables candle collection.
+    index_candle_inst_ids: str = Field(default="BTC-USD", alias="INDEX_CANDLE_INST_IDS")
+
+    def index_candle_inst_id_list(self) -> list[str]:
+        return [t.strip().upper() for t in self.index_candle_inst_ids.replace(";", ",").split(",")
+                if t.strip()]
+
     @staticmethod
     def _parse_hhmm(token: str) -> tuple[int, int]:
         """'10:00' -> (10, 0); a bare '10' -> (10, 0). Tolerates quotes/spaces."""

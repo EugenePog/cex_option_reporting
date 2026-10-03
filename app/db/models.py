@@ -117,6 +117,32 @@ class RawClosedPosition(_RawBase):
     pos_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class RawIndexCandle(Base):
+    """OKX index candles (market/history-index-candles), e.g. BTC-USD at 1-minute bars. Added in 0019.
+
+    Market data, not account data: no account/subaccount columns (the ingest_run that wrote a row
+    has account_label='market'). One row per (cex_code, inst_id, bar, ts) — `ts` is the candle OPEN
+    time — so overlapping fetches from the collector loops and `backfill` never duplicate a candle.
+    Only completed candles (OKX confirm='1') are stored, so a row never changes after insert.
+    `payload` is the raw OKX array ["ts", "o", "h", "l", "c", "confirm"] (strings, as received).
+    """
+
+    __tablename__ = "raw_index_candle"
+    __table_args__ = (
+        UniqueConstraint("cex_code", "inst_id", "bar", "ts", name="uq_raw_index_candle"),
+        {"schema": BRONZE},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ingest_id: Mapped[str] = mapped_column(String(36), ForeignKey(f"{BRONZE}.ingest_run.ingest_id"))
+    cex_code: Mapped[str] = mapped_column(String(16))
+    inst_id: Mapped[str] = mapped_column(String(32))          # index, e.g. "BTC-USD"
+    bar: Mapped[str] = mapped_column(String(8))               # "1m"
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))   # candle open time (UTC)
+    ingest_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    payload: Mapped[list] = mapped_column(JSONB)
+
+
 class RawBill(_RawBase):
     """Account ledger (bills-archive, ~1yr): fees, settlements, deliveries, transfers.
 

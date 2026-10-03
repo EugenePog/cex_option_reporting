@@ -3,6 +3,7 @@
 Every write is tied to a run so bronze is auditable and replayable. Fills are upserted on
 (cex_code, inst_id, trade_id) — OKX tradeId is per-instrument — and closed positions on the leg key
 (cex_code, posId, cTime), so daily overlaps and full backfills neither duplicate nor drop rows.
+Index candles (market data) are upserted on (cex_code, inst_id, bar, ts).
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from app.db.models import (
     RawBalance,
     RawBill,
     RawClosedPosition,
+    RawIndexCandle,
     RawMargin,
     RawOptSummary,
     RawPosition,
@@ -138,6 +140,20 @@ class BronzeWriter:
                 ).returning(RawClosedPosition.id)
                 written += len(s.execute(stmt).fetchall())
         return written
+
+    # -- index candles / market data (idempotent bulk upsert) --------------- #
+    def write_index_candles(self, ingest_id: str, rows: list[Any]) -> int:
+        """Bulk-insert completed index candles; existing (cex_code, inst_id, bar, ts) are kept.
+        Returns the number of NEW candles. One statement per page (≤100 rows)."""
+        if not rows:
+            return 0
+        values = [{"ingest_id": ingest_id, "cex_code": self.cex_code, "inst_id": r.inst_id,
+                   "bar": r.bar, "ts": r.ts, "payload": r.raw} for r in rows]
+        with session_scope() as s:
+            stmt = (pg_insert(RawIndexCandle).values(values)
+                    .on_conflict_do_nothing(constraint="uq_raw_index_candle")
+                    .returning(RawIndexCandle.id))
+            return len(s.execute(stmt).fetchall())
 
     # -- bills / account ledger (idempotent upsert) ------------------------- #
     def write_bills(self, ingest_id: str, rows: list[Any], subacct: str = "") -> int:

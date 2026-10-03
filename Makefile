@@ -24,13 +24,13 @@ init-db:  ## Create schemas + tables from ORM metadata (dev; or use `make migrat
 seed:  ## Load core/settings CSVs from seed/ into the DB (upsert by id)
 	python -m app.cli seed
 
-collect-snapshot-loop:  ## Snapshot scheduler (balance/positions/margin/greeks) — runs at SNAPSHOT_TIMES
+collect-snapshot-loop:  ## Snapshot scheduler (balance/positions/margin/greeks + BTC-USD 1m index candles) — runs at SNAPSHOT_TIMES
 	python -m app.cli snapshot --loop
 
-collect-loop:  ## History scheduler (fills/closed/bills) — once/day at INGEST_HOUR_UTC, limited depth
+collect-loop:  ## History scheduler (fills/closed/bills + BTC-USD 1m index candles) — once/day at INGEST_HOUR_UTC, limited depth
 	python -m app.cli history --loop
 
-backfill:  ## Collect the full available history depth from the exchange (one-off)
+backfill:  ## Full history depth from the exchange, then BTC-USD 1m index candles from the earliest position (one-off)
 	python -m app.cli backfill
 
 pipeline:  ## Run both transform stages (bronze->silver then silver->gold)

@@ -4,6 +4,7 @@
     python -m app.cli snapshot [--loop]  # point-in-time data; --loop fires at SNAPSHOT_TIMES_UTC — pm2 module
     python -m app.cli history  [--loop]  # fills/closed/bills; --loop once/day at INGEST_TIME_UTC — pm2 module
     python -m app.cli backfill           # collect full available history once (manual)
+    python -m app.cli index-candles [--since YYYY-MM-DD]  # BTC-USD 1m index candles (gaps only)
     python -m app.cli pipeline [--stage silver|gold|all] [--loop]  # transforms (default: all)
     python -m app.cli worker  [--loop]   # alerts / reports          (stub)
 """
@@ -80,6 +81,7 @@ def snapshot(
         for c in collectors:
             ingest_id = c.collect_snapshot()
             typer.echo(f"[{c.writer.account_label}] snapshot complete. ingest_id={ingest_id}")
+        _sync_candles()
 
 
 @app.command()
@@ -110,6 +112,16 @@ def history(
         for c in collectors:
             ingest_id = c.collect_history()
             typer.echo(f"[{c.writer.account_label}] history complete. ingest_id={ingest_id}")
+        _sync_candles()
+
+
+def _sync_candles() -> None:
+    """Top up the index candles after a one-shot snapshot / history run (like the loops)."""
+    from app.ingestion.index_candles import sync_index_candles
+    from config.settings import get_settings
+
+    n = sync_index_candles(get_settings().ingest_daily_lookback_days)
+    typer.echo(f"[market] index candles: {n} new")
 
 
 @app.command("set-password")
@@ -135,10 +147,13 @@ def set_password(email: str = typer.Argument(...),
 @app.command()
 def backfill(
     label: str = typer.Option(None, help="Only this account label (default: all accounts)."),
+    candles: bool = typer.Option(True, help="Also backfill the index candles (after positions)."),
 ) -> None:
     """Collect the full available history depth from the exchange (manual, one-off).
 
-    Runs for EVERY account in core.cex_account unless --label narrows it to one.
+    Runs for EVERY account in core.cex_account unless --label narrows it to one. Then, with all
+    positions loaded, fills BTC-USD 1-minute index candles from the day of the earliest open or
+    closed position in bronze (any account) up to now — missing minutes only.
     """
     setup_logging()
     from app.ingestion.collector import iter_account_collectors
@@ -153,6 +168,48 @@ def backfill(
     for c in collectors:
         ingest_id = c.backfill()
         typer.echo(f"[{c.writer.account_label}] backfill complete. ingest_id={ingest_id}")
+    if candles:
+        _backfill_candles(None)
+
+
+def _backfill_candles(since) -> None:
+    from app.ingestion.index_candles import make_index_candle_collector
+
+    collector = make_index_candle_collector()
+    if collector is None:
+        typer.echo("[market] index candles disabled (INDEX_CANDLE_INST_IDS is empty).")
+        return
+    try:
+        results = collector.backfill(since)
+    except Exception as e:  # noqa: BLE001 - account data is already committed
+        typer.echo(f"[market] index candle backfill FAILED: {e}", err=True)
+        raise typer.Exit(1) from e
+    if not results:
+        typer.echo("[market] index candles: no positions in bronze yet — nothing to backfill.")
+    for r in results:
+        typer.echo(f"[market] index candles {r.inst_id} 1m: {r.written} new "
+                   f"({r.start:%Y-%m-%d %H:%M} → {r.end:%Y-%m-%d %H:%M} UTC, "
+                   f"{r.gaps} gap(s) filled)")
+
+
+@app.command("index-candles")
+def index_candles(
+    since: str = typer.Option(None, help="Start date YYYY-MM-DD (UTC). Default: the day of the "
+                                         "earliest open or closed position in bronze."),
+) -> None:
+    """Backfill index candles (INDEX_CANDLE_INST_IDS, default BTC-USD, 1m) — missing minutes only.
+
+    The same step `backfill` runs after loading positions; use it to re-run or extend candles
+    without re-collecting account history.
+    """
+    setup_logging()
+    from datetime import datetime, timezone
+
+    start = None
+    if since:
+        d = datetime.strptime(since, "%Y-%m-%d")
+        start = d.replace(tzinfo=timezone.utc)
+    _backfill_candles(start)
 
 
 @app.command()

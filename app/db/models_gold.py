@@ -6,12 +6,17 @@ always reproducible. Each table has a surrogate `id` PK; grains are documented p
 Currency: `*_usd` columns are USD; PnL columns (`realized_pnl`, `net_pnl`, `upl`, deal PnL) are in
 the account settlement currency (coin, e.g. BTC) as OKX reports it. `return_pct`/`max_drawdown_pct`/
 `sharpe` describe the USD equity curve.
+
+Exception to the rebuild: `index_candle` (market data, added in 0021) is updated incrementally —
+only the bars touched by new silver candles are recomputed — because it grows by ~1,440 minutes a
+day and never changes otherwise.
 """
 from __future__ import annotations
 
 from datetime import date, datetime
 
 from sqlalchemy import (
+    ARRAY,
     BigInteger,
     Date,
     DateTime,
@@ -72,7 +77,7 @@ class UnderlyingPrice(Base):
 
 class ExpirySettlement(Base):
     """Grain: (subaccount_id, underlying, expiry). Official OKX settlement price at expiry
-    (from delivery bills) — the true expiration price for report ②'s expired-mode marker."""
+    (from delivery bills) — the true expiration price for report ③ (payoff)'s expired-mode marker."""
 
     __tablename__ = "expiry_settlement"
     __table_args__ = (UniqueConstraint("subaccount_id", "underlying", "expiry",
@@ -181,7 +186,7 @@ class DealLedger(Base):
     size: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     fee: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     realized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
-    realized_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # coin×rate (=①a basis)
+    realized_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # coin×rate (=② basis)
     hold_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
@@ -350,3 +355,69 @@ class PositionLeg(Base):
     ccy: Mapped[str | None] = mapped_column(String(16), nullable=True)
     n_fills: Mapped[int | None] = mapped_column(Integer, nullable=True)
     n_snapshots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # price-with-boxes chart (0021): the leg is drawn as a line at `strike` from `pos_opened_at` to
+    # `expires_at`; its size in coin = size (contracts) × ct_val from core.contract_size.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ct_val: Mapped[float | None] = mapped_column(Numeric, nullable=True)       # coin per contract
+    size_coin: Mapped[float | None] = mapped_column(Numeric, nullable=True)    # size × ct_val
+    coin: Mapped[str | None] = mapped_column(String(16), nullable=True)        # e.g. BTC
+
+
+class BoxShape(Base):
+    """Grain: (subaccount_id, strategy_id, underlying) — one rectangle of the dashboard chart
+    "Price with strategy boxes". Added in 0021; rebuilt each run from gold.position_leg.
+
+    A box (= strategy, see the Box builder) is drawn as the rectangle that covers all its legs of
+    one underlying: left = first leg opened, right = last leg expiry (08:00 UTC), bottom / top =
+    lowest / highest strike. Each leg is a line at its strike from open to expiry (the lines come
+    from gold.position_leg). Label = total size of the legs, in coin. The `unassigned` box is stored
+    too; the chart draws its legs without a rectangle.
+    """
+
+    __tablename__ = "box_shape"
+    __table_args__ = ({"schema": GOLD},)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    subaccount_id: Mapped[int] = _sub_fk()
+    strategy_id: Mapped[int | None] = _strat_fk_nullable()
+    underlying: Mapped[str] = mapped_column(String(32), index=True)
+    coin: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))   # first leg opened
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))      # last leg expiry
+    strike_lo: Mapped[float] = mapped_column(Numeric)
+    strike_hi: Mapped[float] = mapped_column(Numeric)
+    n_legs: Mapped[int] = mapped_column(Integer)
+    n_open_legs: Mapped[int] = mapped_column(Integer)
+    size_contracts: Mapped[float | None] = mapped_column(Numeric, nullable=True)   # Σ leg size
+    size_coin: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # Σ size × ct_val
+    status: Mapped[str] = mapped_column(String(8))                  # open (any leg open) | closed
+    net_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # realized + upl
+    leg_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger))   # silver.position_leg ids
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IndexCandle(Base):
+    """Grain: (cex_code, inst_id, bar, ts) — index candles (e.g. BTC-USD) for the price chart.
+    Added in 0021.
+
+    Bars '1h', '4h', '1d' on UTC boundaries (4h = 00/04/08/12/16/20 UTC), aggregated from the
+    1-minute silver.index_candle: open = first minute, close = last, high / low = max / min.
+    `n_minutes` < bar length marks the still-forming last bar (or a gap). Updated incrementally:
+    `src_max_id` is the highest silver id in the bar, so max(src_max_id) is the watermark and a
+    run recomputes only the bars that received new minutes. Market data — no account columns.
+    """
+
+    __tablename__ = "index_candle"
+    __table_args__ = (UniqueConstraint("cex_code", "inst_id", "bar", "ts",
+                                       name="uq_gold_index_candle"), {"schema": GOLD})
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cex_code: Mapped[str] = mapped_column(String(16))
+    inst_id: Mapped[str] = mapped_column(String(32))
+    bar: Mapped[str] = mapped_column(String(8))                 # '1h' | '4h' | '1d'
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))   # bar open time (UTC)
+    open: Mapped[float] = mapped_column(Numeric)
+    high: Mapped[float] = mapped_column(Numeric)
+    low: Mapped[float] = mapped_column(Numeric)
+    close: Mapped[float] = mapped_column(Numeric)
+    n_minutes: Mapped[int] = mapped_column(Integer)
+    src_max_id: Mapped[int] = mapped_column(BigInteger)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

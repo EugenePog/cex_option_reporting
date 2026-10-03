@@ -1,4 +1,4 @@
-"""FastAPI app: authenticated dashboard (reports ①–⑤) + Analyze tab (⑥) + admin Box builder.
+"""FastAPI app: authenticated Dashboard (graphs ①–⑥) + Analyze tab (Ⓐ) + admin Box builder (⑦).
 
 Server-rendered pages (Jinja2, dark theme) that fetch JSON from /api/* and draw Plotly charts.
 Auth is a signed session cookie; pages redirect to /login when not authenticated.

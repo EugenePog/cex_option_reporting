@@ -48,3 +48,8 @@ def test_box_builder_api_requires_auth():
 def test_box_edit_and_delete_require_auth():
     assert client.put("/api/admin/box-builder/strategies/1", json={"name": "x"}).status_code == 401
     assert client.delete("/api/admin/box-builder/strategies/1").status_code == 401
+
+
+def test_price_boxes_requires_auth():
+    r = client.get("/api/price-boxes")
+    assert r.status_code == 401

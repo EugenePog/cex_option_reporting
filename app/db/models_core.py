@@ -1,10 +1,10 @@
 """Core-layer ORM models (schema: core) — settings / dimension tables.
 
-These are the manually-managed tables (users, accounts, subaccounts, strategies, rules) plus a
-couple of system tables (audit_log, pipeline_watermark) and the app-written manual strategy links
-(strategy_link, written by the admin Box builder — NOT seeded). Silver/gold rows are scoped and
-tagged via these. Kept in their own module; imported by app.db.models so a single import registers
-all.
+These are the manually-managed tables (users, accounts, subaccounts, strategies, rules, contract
+sizes per exchange) plus a couple of system tables (audit_log, pipeline_watermark) and the
+app-written manual strategy links (strategy_link, written by the admin Box builder — NOT seeded).
+Silver/gold rows are scoped and tagged via these. Kept in their own module; imported by
+app.db.models so a single import registers all.
 """
 from __future__ import annotations
 
@@ -179,6 +179,33 @@ class Instrument(Base):
     expiry: Mapped[datetime | None] = mapped_column(Date, nullable=True)
     contract_ccy: Mapped[str | None] = mapped_column(String(16), nullable=True)
     tick_size: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+
+class ContractSize(Base):
+    """Contract size (OKX `ctVal`) per exchange, instrument type and underlying — seeded.
+    Added in 0020.
+
+    How many units of the underlying coin one contract represents, e.g. OKX BTC-USD options
+    = 0.01 BTC, ETH-USD = 0.1 ETH. Exchanges size contracts differently, so the key includes
+    `cex_code`. Read by the silver→gold pipeline (gold.position_leg.size_coin, gold.box_shape) and
+    the payoff report; replaces the old hardcoded `_CONTRACT_SIZE` in app/domain/pricing.py.
+    """
+
+    __tablename__ = "contract_size"
+    __table_args__ = (
+        UniqueConstraint("cex_code", "inst_type", "underlying", name="uq_contract_size"),
+        CheckConstraint("ct_val > 0", name="ck_contract_size_positive"),
+        {"schema": CORE},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cex_code: Mapped[str] = mapped_column(String(16))           # 'OKX'
+    inst_type: Mapped[str] = mapped_column(String(16))          # 'OPTION' | 'FUTURES' | 'SWAP'
+    underlying: Mapped[str] = mapped_column(String(32))         # 'BTC-USD' (OKX instFamily)
+    ct_val: Mapped[float] = mapped_column(Numeric)              # coin units per contract
+    ct_val_ccy: Mapped[str] = mapped_column(String(16))         # 'BTC'
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class AuditLog(Base):

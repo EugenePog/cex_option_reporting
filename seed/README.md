@@ -8,7 +8,8 @@ starting templates; edit them or create real `<table>.csv` files alongside them.
 ```bash
 cd seed
 for f in *.example.csv; do cp "$f" "${f%.example.csv}.csv"; done
-# then edit user.csv, cex_account.csv, subaccount.csv, strategy.csv, strategy_rule.csv
+# then edit user.csv, cex_account.csv, subaccount.csv, strategy.csv, strategy_rule.csv,
+# contract_size.csv
 ```
 
 > Note: `cex_account` credential columns are intentionally left blank — for dev the collector reads
@@ -29,7 +30,8 @@ python -m app.cli seed --replace         # truncate the seed tables first, then 
 - **Include `id`** in every row. FKs reference these ids (e.g. `cex_account.user_id` → `user.id`),
   and the loader upserts on `id`, so re-running updates rather than duplicating. Sequences are reset
   to `max(id)` after each load.
-- **Load order / dependencies:** `user` → `cex_account` → `subaccount` → `strategy` → `strategy_rule`.
+- **Load order / dependencies:** `user` → `cex_account` → `subaccount` → `strategy` → `strategy_rule`;
+  `contract_size` has no dependencies.
 - `match_json` is JSON inside a CSV cell — wrap the whole cell in double quotes and double any inner
   quotes, e.g. `"{""inst_pattern"": ""BTC-USD-*""}"`.
 - Tables NOT seeded here: `instrument` (populated by the silver pipeline), `audit_log` and
@@ -78,6 +80,21 @@ python -m app.cli seed --replace         # truncate the seed tables first, then 
 | column | allowed values |
 |---|---|
 | `color` | hex color for the UI, e.g. `#4c9aff` |
+
+**`contract_size`** — contract size per exchange (migration 0020; replaces the old hardcoded values)
+
+| column | allowed values |
+|---|---|
+| `cex_code` | `OKX` (one row per exchange — sizes differ between exchanges) |
+| `inst_type` | `OPTION` (also `FUTURES`, `SWAP`, `SPOT` — OKX instType names) |
+| `underlying` | OKX instFamily, e.g. `BTC-USD`, `ETH-USD` (= the option's underlying) |
+| `ct_val` | coin units per contract, > 0 — OKX options: BTC-USD `0.01`, ETH-USD `0.1`, SOL-USD `1` |
+| `ct_val_ccy` | the coin `ct_val` is counted in, e.g. `BTC` |
+
+The migration already inserts the three OKX option rows (ids 1–3), so seeding this file is only
+needed to change or add rows. A leg whose (exchange, type, underlying) has no row gets no coin
+size in gold (`size_coin` NULL — the chart then shows contracts) and the payoff report counts
+1 contract = 1 coin; the pipeline logs a warning naming the missing row.
 
 **`strategy_rule`**
 

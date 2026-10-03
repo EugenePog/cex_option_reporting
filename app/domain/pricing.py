@@ -13,18 +13,9 @@ def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-# OKX option contract sizes = underlying units represented by 1 contract (ctVal). OKX quotes
-# option `pos`/`closeTotalPos` in contracts, while payoff/intrinsic are per unit of underlying, so
-# multiply size by this to get real exposure. BTC=0.01, ETH=0.1 per OKX specs; extend per venue.
-# (Ideally sourced from OKX public instruments `ctVal`; hardcoded here to avoid extra ingestion.)
-_CONTRACT_SIZE = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0}
-
-
-def contract_size(underlying: str | None) -> float:
-    """Underlying units per contract for an OKX option, keyed by base coin (e.g. 'BTC-USD'->0.01)."""
-    if not underlying:
-        return 1.0
-    return _CONTRACT_SIZE.get(underlying.upper().split("-")[0], 1.0)
+# Contract sizes (OKX ctVal: BTC 0.01, ETH 0.1 …) are no longer hardcoded here: they live in
+# core.contract_size per exchange (migration 0020) — see app.domain.contracts and
+# app.db.contract_sizes.
 
 
 def payoff_intrinsic(spot: float, strike: float, opt_type: str) -> float:

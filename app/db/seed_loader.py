@@ -4,7 +4,8 @@ Each CSV under the seed folder is upserted by primary key `id` into its `core` t
 dependency order, then the id sequence is reset. Re-running updates rather than duplicating.
 
 Only the manually-managed settings tables are handled here:
-    user -> cex_account -> subaccount -> strategy -> strategy_rule
+    user -> cex_account -> subaccount -> strategy -> strategy_rule, and contract_size
+    (contract size per exchange / instrument type / underlying — no FKs)
 (`instrument` is derived by the silver pipeline; `audit_log` / `pipeline_watermark` are app-written;
 `strategy_link` holds the Box builder's manual pins — app-written, never seeded.)
 
@@ -29,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.db.base import session_scope
 from app.db.models_core import (
     CexAccount,
+    ContractSize,
     CoreUser,
     Strategy,
     StrategyRule,
@@ -44,6 +46,7 @@ SEED_TABLES: list[tuple[str, type]] = [
     ("subaccount", Subaccount),
     ("strategy", Strategy),
     ("strategy_rule", StrategyRule),
+    ("contract_size", ContractSize),
 ]
 _MODEL_BY_NAME = {name: model for name, model in SEED_TABLES}
 

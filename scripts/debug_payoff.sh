@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Diagnose report ② (Payoff): expiry coverage + settlement-price availability.
+# Diagnose report ③ (Payoff): expiry coverage + settlement-price availability.
 # Usage: scripts/debug_payoff.sh [underlying]   (default BTC-USD)
 set -euo pipefail
 ULY="${1:-BTC-USD}"

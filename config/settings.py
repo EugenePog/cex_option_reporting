@@ -86,12 +86,13 @@ class Settings(BaseSettings):
     # Pipeline cadence (seconds) for `pipeline --loop`
     pipeline_interval_seconds: int = Field(default=300, alias="PIPELINE_INTERVAL_SECONDS")
 
-    # Snapshot collector: point-in-time data (balance/positions/margin/greeks), MULTIPLE runs/day.
-    # Comma-separated UTC times "HH:MM,HH:MM,...".
-    snapshot_times_utc: str = Field(default="00:00,06:00,12:00,18:00", alias="SNAPSHOT_TIMES_UTC")
+    # Collector schedules (UTC). Comma-separated "HH:MM" times; "*:MM" = every hour at minute MM.
+    # Default for both collectors: every hour on the hour (00:00, 01:00, …, 23:00).
+    # Snapshot collector: point-in-time data (balance/positions/margin/greeks).
+    snapshot_times_utc: str = Field(default="*:00", alias="SNAPSHOT_TIMES_UTC")
 
-    # History collector: fills/closed-positions/bills, ONE run/day at this UTC time (HH:MM), limited depth.
-    ingest_time_utc: str = Field(default="10:00", alias="INGEST_TIME_UTC")       # history daily run time (UTC)
+    # History collector: fills/closed-positions/bills over a limited window (see lookback below).
+    ingest_time_utc: str = Field(default="*:00", alias="INGEST_TIME_UTC")
     ingest_daily_lookback_days: int = Field(default=1, alias="INGEST_DAILY_LOOKBACK_DAYS")  # today + N prior days of history
 
     okx_k_account_label: str = Field(default="OKX_K", alias="OKX_K_ACCOUNT_LABEL")  # tag stored on bronze rows
@@ -105,23 +106,37 @@ class Settings(BaseSettings):
                 if t.strip()]
 
     @staticmethod
-    def _parse_hhmm(token: str) -> tuple[int, int]:
-        """'10:00' -> (10, 0); a bare '10' -> (10, 0). Tolerates quotes/spaces."""
+    def _parse_hhmm(token: str) -> tuple[int | str, int]:
+        """'10:00' -> (10, 0); a bare '10' -> (10, 0); '*:00' -> ('*', 0) = every hour.
+        Tolerates quotes/spaces."""
         token = token.strip().strip("'\"").strip()
-        if ":" in token:
-            hh, mm = token.split(":")
-            return int(hh), int(mm)
-        return int(token), 0
+        hh, mm = token.split(":") if ":" in token else (token, "0")
+        hh = hh.strip()
+        return ("*" if hh == "*" else int(hh)), int(mm)
 
-    def snapshot_time_tuples(self) -> list[tuple[int, int]]:
-        """Parse SNAPSHOT_TIMES_UTC into [(hour, minute), ...]. Tolerates braces/quotes/spaces."""
-        cleaned = self.snapshot_times_utc.replace("{", "").replace("}", "")
-        return [self._parse_hhmm(tok) for tok in cleaned.split(",")
-                if tok.strip().strip("'\"").strip()]
+    @classmethod
+    def _parse_times(cls, value: str) -> list[tuple[int | str, int]]:
+        """Comma-separated times → [(hour | '*', minute), ...], duplicates dropped, order kept.
+        Tolerates braces/quotes/spaces and empty tokens."""
+        out: list[tuple[int | str, int]] = []
+        for tok in value.replace("{", "").replace("}", "").split(","):
+            if tok.strip().strip("'\"").strip():
+                t = cls._parse_hhmm(tok)
+                if t not in out:
+                    out.append(t)
+        return out
 
-    def ingest_time_tuple(self) -> tuple[int, int]:
-        """Parse INGEST_TIME_UTC ('HH:MM') into (hour, minute)."""
-        return self._parse_hhmm(self.ingest_time_utc)
+    def snapshot_time_tuples(self) -> list[tuple[int | str, int]]:
+        """Parse SNAPSHOT_TIMES_UTC into [(hour | '*', minute), ...]."""
+        return self._parse_times(self.snapshot_times_utc)
+
+    def ingest_time_tuples(self) -> list[tuple[int | str, int]]:
+        """Parse INGEST_TIME_UTC into [(hour | '*', minute), ...] (one or more times)."""
+        return self._parse_times(self.ingest_time_utc)
+
+    def ingest_time_tuple(self) -> tuple[int | str, int]:
+        """First INGEST_TIME_UTC time (kept for callers that expect a single time)."""
+        return self.ingest_time_tuples()[0]
 
     # Web
     web_host: str = Field(default="0.0.0.0", alias="WEB_HOST")

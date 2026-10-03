@@ -1,36 +1,50 @@
-"""JSON report endpoints backing the six dashboard reports.
+"""JSON report endpoints backing the dashboard reports and the Analyze tab.
 
 All queries are scoped to the current user's subaccounts (admin => all). See
 REPORT_GOLD_ATTRIBUTE_MAPPING.md for the column→visual mapping this implements.
-Reports ①–⑤ read current/aggregate gold; the Analyze tab ⑥ recomputes from gold.deal_ledger so it
-responds live to filters (the precomputed perf tables are used for fixed-period admin views).
+The Dashboard reads current/aggregate gold — graph ① "Price with strategy boxes" (/price-boxes)
+reads gold.index_candle + gold.box_shape + gold.position_leg; the Analyze tab recomputes from
+gold.deal_ledger so it responds live to filters (the precomputed perf tables are used for
+fixed-period admin views).
 """
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 
 from app.db.base import SessionLocal
-from app.db.models_core import Strategy
+from app.db.contract_sizes import load_contract_sizes
+from app.db.models_core import Strategy, Subaccount
 from app.db.models_gold import (
     AssetBalanceTimeseries,
     AssetPnlDaily,
     BalanceTimeseries,
+    BoxShape,
     DealLedger,
     GreeksByExpiry,
+    IndexCandle,
     PnlDaily,
     ExpirySettlement,
     PositionCurrent,
+    PositionLeg as GoldPositionLeg,
     UnderlyingPrice,
 )
+from app.domain.boxes import (
+    BAR_STEP,
+    BARS,
+    Leg,
+    auto_bar,
+    build_boxes,
+    closed_early,
+    exposure_segments,
+    in_period,
+)
 from app.domain.metrics import deal_metrics, equity_metrics
-from app.domain.pricing import black76_price, contract_size, payoff_intrinsic
-
-# OKX crypto options settle at 08:00 UTC on the expiry date.
-OKX_SETTLE_UTC = time(8, 0)
+from app.domain.instruments import OPTION_SETTLE_UTC as OKX_SETTLE_UTC  # 08:00 UTC on expiry day
+from app.domain.pricing import black76_price, payoff_intrinsic
 from app.web.deps import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/api", tags=["reports"])
@@ -96,12 +110,29 @@ def filters(user: CurrentUser = Depends(get_current_user)) -> dict:
             select(AssetBalanceTimeseries.ccy)
             .where(AssetBalanceTimeseries.subaccount_id.in_(subs))
         ) if c})
+        # Defaults the Dashboard fills into its selectors BEFORE drawing anything, so every graph
+        # uses (and the page shows) the same values: the underlying with the most position legs
+        # (ties: alphabetical), and the user's only account — or "" = all accounts when several.
+        leg_counts = dict(s.execute(
+            select(GoldPositionLeg.underlying, func.count())
+            .where(GoldPositionLeg.subaccount_id.in_(subs), GoldPositionLeg.underlying.isnot(None))
+            .group_by(GoldPositionLeg.underlying)).all())
+        # underlyings with index candles on the user's exchanges (graph ① can show their price even
+        # before there are positions in them)
+        cexes = select(Subaccount.cex_code).where(Subaccount.id.in_(subs))
+        priced = {u for (u,) in s.execute(
+            select(IndexCandle.inst_id).where(IndexCandle.cex_code.in_(cexes)).distinct())}
+    underlyings = sorted(set(underlyings) | set(leg_counts) | priced)
+    default_ul = (min(underlyings, key=lambda u: (-leg_counts.get(u, 0), u))
+                  if underlyings else None)
     return {"underlyings": underlyings, "strategies": strategies, "assets": assets,
             "subaccounts": subs, "is_admin": user.is_admin,
-            "periods": ["mtd", "ytd", "all", "7d", "30d", "90d"]}
+            "periods": ["mtd", "ytd", "all", "7d", "30d", "90d"],
+            "defaults": {"underlying": default_ul,
+                         "subaccount": subs[0] if len(subs) == 1 else ""}}
 
 
-# ①b Per-asset (in-kind) equity & daily net P&L --------------------------- #
+# ②b Per-asset (in-kind) equity & daily net P&L --------------------------- #
 @router.get("/asset-equity")
 def asset_equity(ccy: str | None = None, subaccount: int | None = None,
                  frm: str | None = None, till: str | None = None,
@@ -147,7 +178,147 @@ def asset_equity(ccy: str | None = None, subaccount: int | None = None,
     return {"ccy": ccy, "balance": balance, "pnl": pnl, "header": header}
 
 
-# ① Equity curve & daily net P&L ------------------------------------------- #
+# ① Price with strategy boxes --------------------------------------------- #
+def _iso(v: datetime | None) -> str | None:
+    """UTC ISO string — the chart's time axis is UTC (expiries are at 08:00 UTC)."""
+    return v.astimezone(timezone.utc).isoformat() if v else None
+
+
+def _num(v) -> float | None:
+    return float(v) if v is not None else None
+
+
+@router.get("/price-boxes")
+def price_boxes(underlying: str | None = None, subaccount: int | None = None, bar: str = "auto",
+                frm: str | None = None, till: str | None = None,
+                user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Index candles with every box (strategy) drawn on them, for the user's accounts.
+
+    Each leg = a line at its strike from open time to expiry (closed early: solid to the close, a
+    dot, dashed to expiry); each box = the rectangle around its legs, labelled with their total size
+    in coin; `exposure` = total open size over time (legs count until they are closed). Obeys the
+    Dashboard filters (underlying, account) and its own reporting period (frm / till, 'YYYY-MM-DD',
+    like the equity graph): only legs whose line overlaps the period are drawn and the boxes are
+    built around those legs — the whole box (gold.box_shape) when there is no period.
+    Without an underlying the one with the most legs that has price data is used."""
+    subs = _subs(user, subaccount)
+    now = datetime.now(timezone.utc)
+    fd, td, lo, hi = _date_bounds(frm, till)
+    with SessionLocal() as s:
+        sub_cex = dict(s.execute(select(Subaccount.id, Subaccount.cex_code)
+                                 .where(Subaccount.id.in_(subs))).all())
+        cexes = sorted(set(sub_cex.values()))
+        priced = set(s.execute(select(IndexCandle.cex_code, IndexCandle.inst_id)
+                               .where(IndexCandle.cex_code.in_(cexes)).distinct()).all())
+        priced_ul = sorted({inst for _cex, inst in priced})
+        chosen = underlying
+        if not chosen:
+            best = s.execute(
+                select(GoldPositionLeg.underlying, func.count())
+                .where(GoldPositionLeg.subaccount_id.in_(subs),
+                       GoldPositionLeg.underlying.in_(priced_ul))
+                .group_by(GoldPositionLeg.underlying).order_by(func.count().desc())).first()
+            chosen = best[0] if best else (priced_ul[0] if priced_ul else None)
+        cex = next((c for c in cexes if (c, chosen) in priced), None)
+
+        rows = s.execute(select(GoldPositionLeg).where(
+            GoldPositionLeg.subaccount_id.in_(subs), GoldPositionLeg.underlying == chosen,
+            GoldPositionLeg.strike.isnot(None)).order_by(GoldPositionLeg.pos_opened_at)
+        ).scalars().all() if chosen else []
+        pairs = []                                   # (gold row, domain leg) inside the period
+        for lg in rows:
+            dom = Leg(
+                leg_id=lg.position_leg_id, subaccount_id=lg.subaccount_id,
+                strategy_id=lg.strategy_id, underlying=lg.underlying, strike=_num(lg.strike),
+                opened_at=lg.pos_opened_at, expires_at=lg.expires_at, status=lg.status,
+                closed_at=lg.closed_at, last_seen_at=lg.last_seen_at, size=_num(lg.size),
+                size_coin=_num(lg.size_coin), coin=lg.coin, close_type=lg.close_type,
+                pnl_usd=_num(lg.realized_pnl_usd if lg.realized_pnl_usd is not None
+                             else lg.upl_usd))
+            if in_period(dom, lo, hi):
+                pairs.append((lg, dom))
+        if lo is None and hi is None:                # whole history: the gold rectangles
+            boxes = s.execute(select(BoxShape).where(BoxShape.subaccount_id.in_(subs),
+                                                     BoxShape.underlying == chosen)
+                              .order_by(BoxShape.started_at)).scalars().all() if chosen else []
+        else:                                        # a period: same rule over the shown legs
+            boxes = build_boxes([dom for _lg, dom in pairs])
+        meta = {sid: (name, color) for sid, name, color in s.execute(
+            select(Strategy.id, Strategy.name, Strategy.color)
+            .where(Strategy.id.in_({b.strategy_id for b in boxes if b.strategy_id})))}
+
+        # visible time range: the period (till inclusive → next midnight) if given; otherwise all
+        # boxes (first open → last expiry) and now; with no boxes, the last 30 days
+        if boxes:
+            t0 = min(b.started_at for b in boxes) - timedelta(days=1)
+            t1 = max(max(b.ends_at for b in boxes), now) + timedelta(days=1)
+        else:
+            t0, t1 = now - timedelta(days=30), now + timedelta(days=1)
+        if lo is not None:
+            t0 = lo
+        if td is not None:
+            t1 = datetime.combine(td + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        bar_auto = bar not in BARS
+        bar_used = auto_bar(t0, t1) if bar_auto else bar
+        candles, last = [], None
+        if cex:
+            candles = s.execute(
+                select(IndexCandle.ts, IndexCandle.open, IndexCandle.high, IndexCandle.low,
+                       IndexCandle.close)
+                .where(IndexCandle.cex_code == cex, IndexCandle.inst_id == chosen,
+                       IndexCandle.bar == bar_used, IndexCandle.ts >= t0 - BAR_STEP[bar_used],
+                       IndexCandle.ts < t1)
+                .order_by(IndexCandle.ts)).all()
+            last = s.execute(
+                select(IndexCandle.ts, IndexCandle.close, IndexCandle.n_minutes)
+                .where(IndexCandle.cex_code == cex, IndexCandle.inst_id == chosen,
+                       IndexCandle.bar == "1h")
+                .order_by(IndexCandle.ts.desc()).limit(1)).first()
+
+    multi_acct = len({b.subaccount_id for b in boxes}) > 1
+    box_key = {(b.subaccount_id, b.strategy_id): i for i, b in enumerate(boxes)}
+    out_boxes = []
+    for i, b in enumerate(boxes):
+        name, color = meta.get(b.strategy_id, ("(no box)", None))
+        size_coin, size_ct = _num(b.size_coin), _num(b.size_contracts)
+        label = (f"{size_coin:g} {b.coin}" if size_coin is not None
+                 else f"{size_ct:g} contracts" if size_ct is not None else "")
+        out_boxes.append({
+            "key": i, "strategy_id": b.strategy_id, "subaccount_id": b.subaccount_id,
+            "name": name, "color": color, "is_unassigned": name == "unassigned",
+            "legend": f"{name} · Account {b.subaccount_id}" if multi_acct else name,
+            "started_at": _iso(b.started_at), "ends_at": _iso(b.ends_at),
+            "strike_lo": _num(b.strike_lo), "strike_hi": _num(b.strike_hi),
+            "n_legs": b.n_legs, "n_open_legs": b.n_open_legs, "status": b.status,
+            "size_coin": size_coin, "size_contracts": size_ct, "coin": b.coin, "label": label,
+            "net_pnl_usd": _num(b.net_pnl_usd),
+        })
+    out_legs = [{
+        "id": lg.position_leg_id, "box": box_key.get((lg.subaccount_id, lg.strategy_id)),
+        "inst_id": lg.inst_id, "opt_type": lg.opt_type, "strike": _num(lg.strike),
+        "side": lg.side, "size": _num(lg.size), "size_coin": _num(lg.size_coin),
+        "coin": lg.coin, "status": lg.status, "close_type": lg.close_type,
+        "closed_early": closed_early(dom),
+        "opened_at": _iso(lg.pos_opened_at), "expires_at": _iso(lg.expires_at),
+        "closed_at": _iso(lg.closed_at), "pnl_usd": dom.pnl_usd,
+    } for lg, dom in pairs]
+    exposure = [{"t0": _iso(sg.t0), "t1": _iso(sg.t1), "total": sg.total}
+                for sg in exposure_segments([dom for _lg, dom in pairs], now)]
+    coin = next((b.coin for b in boxes if b.coin), None) or (chosen or "").split("-")[0] or None
+    return {
+        "underlying": chosen, "underlyings": priced_ul, "cex_code": cex,
+        "bar": bar_used, "bar_auto": bar_auto, "now": _iso(now), "coin": coin,
+        "period": {"from": fd.isoformat() if fd else None, "till": td.isoformat() if td else None},
+        "range": [_iso(t0), _iso(t1)],
+        "candles": [{"t": _iso(ts), "o": _f(o), "h": _f(h), "l": _f(lo_), "c": _f(c)}
+                    for ts, o, h, lo_, c in candles],
+        "last": ({"t": _iso(last[0] + timedelta(minutes=int(last[2]) - 1)), "close": _f(last[1])}
+                 if last else None),
+        "boxes": out_boxes, "legs": out_legs, "exposure": exposure,
+    }
+
+
+# ② Equity curve & daily net P&L ------------------------------------------- #
 @router.get("/equity")
 def equity(subaccount: int | None = None, frm: str | None = None, till: str | None = None,
            user: CurrentUser = Depends(get_current_user)) -> dict:
@@ -163,7 +334,7 @@ def equity(subaccount: int | None = None, frm: str | None = None, till: str | No
         eq_rows = s.execute(eq_q.group_by(BalanceTimeseries.captured_at)
                             .order_by(BalanceTimeseries.captured_at)).all()
 
-        # ①a is a USD report → return USD (fee-inclusive net); coin kept for reference/back-compat.
+        # ② is a USD report → return USD (fee-inclusive net); coin kept for reference/back-compat.
         pnl_q = select(PnlDaily.date,
                        func.sum(PnlDaily.net_pnl_usd), func.sum(PnlDaily.realized_pnl_usd),
                        func.sum(PnlDaily.unrealized_pnl_usd), func.sum(PnlDaily.fees_usd),
@@ -186,7 +357,7 @@ def equity(subaccount: int | None = None, frm: str | None = None, till: str | No
     return {"equity": equity_series, "pnl": pnl, "header": header}
 
 
-# ② Strike × expiry position map ------------------------------------------- #
+# ④ Strike × expiry position map ------------------------------------------- #
 @router.get("/position-map")
 def position_map(underlying: str | None = None, subaccount: int | None = None,
                  user: CurrentUser = Depends(get_current_user)) -> dict:
@@ -211,7 +382,7 @@ def position_map(underlying: str | None = None, subaccount: int | None = None,
             "spot": spot, "as_of": captured}
 
 
-# ③ Greeks term structure -------------------------------------------------- #
+# ⑤ Greeks term structure -------------------------------------------------- #
 @router.get("/greeks")
 def greeks(underlying: str | None = None, subaccount: int | None = None,
            user: CurrentUser = Depends(get_current_user)) -> dict:
@@ -241,7 +412,7 @@ def greeks(underlying: str | None = None, subaccount: int | None = None,
     return out
 
 
-# ⑤ Maturity ladder -------------------------------------------------------- #
+# ⑥ Maturity ladder -------------------------------------------------------- #
 @router.get("/ladder")
 def ladder(underlying: str | None = None, subaccount: int | None = None,
            user: CurrentUser = Depends(get_current_user)) -> dict:
@@ -267,7 +438,7 @@ def ladder(underlying: str | None = None, subaccount: int | None = None,
             "puts": [round(puts.get(e, 0), 2) for e in expiries]}
 
 
-# ② Payoff / risk profile -------------------------------------------------- #
+# ③ Payoff / risk profile -------------------------------------------------- #
 def _settlement_price(s, subs, underlying, chosen) -> float | None:
     """Expiration price: prefer the OKX official settlement (gold.expiry_settlement, from delivery
     bills); fall back to the nearest gold.underlying_price snapshot on/before the expiry day."""
@@ -315,6 +486,13 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
             cq = cq.where(DealLedger.underlying == underlying)
         open_all = s.execute(oq).scalars().all()
         closed_all = s.execute(cq).scalars().all()
+        # contract size (ctVal) per exchange from core.contract_size; the leg's exchange comes from
+        # its subaccount. A missing row falls back to 1 contract = 1 coin (logged once).
+        sizes = load_contract_sizes(s)
+        sub_cex = dict(s.execute(select(Subaccount.id, Subaccount.cex_code)).all())
+
+        def contract_size(sub_id: int, underlying: str | None) -> float:
+            return sizes.ct_val_or_default(sub_cex.get(sub_id), underlying)
 
         open_exps = {p.expiry for p in open_all if p.expiry}
         closed_exps = {c.expiry for c in closed_all if c.expiry}
@@ -341,7 +519,7 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
                       "time": marker_at.strftime("%H:%M") if marker_at else None}
             include_t0 = True
             for p in open_legs:
-                cs = contract_size(p.underlying)
+                cs = contract_size(p.subaccount_id, p.underlying)
                 fees_usd += _f(p.fee) * (_f(p.idx_px) or marker_price)   # fee (coin) → USD
                 norm.append((_f(p.strike), p.opt_type, _f(p.size) * cs,   # pos is signed (+long/−short)
                              _f(p.avg_px) * (_f(p.idx_px) or marker_price), _f(p.iv) or 0.5))
@@ -351,10 +529,10 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
                 or (sum(_f(c.strike) for c in closed_legs) / len(closed_legs))
             marker = {"value": marker_price, "label": "expiry", "time": None}
             include_t0 = False
-            realized_usd = sum(_f(c.realized_pnl_usd) for c in closed_legs)  # real OKX figure (=①a)
+            realized_usd = sum(_f(c.realized_pnl_usd) for c in closed_legs)  # real OKX figure (=②)
             for c in closed_legs:
                 sign = -1.0 if (c.side or "").lower() == "short" else 1.0
-                cs = contract_size(c.underlying)
+                cs = contract_size(c.subaccount_id, c.underlying)
                 fees_usd += _f(c.fee) * marker_price
                 norm.append((_f(c.strike), c.opt_type, sign * _f(c.size) * cs,
                              _f(c.entry_px) * marker_price, 0.0))
@@ -365,7 +543,7 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
             marker = {"value": marker_price, "label": "expiry", "time": None}
             include_t0 = False
             for p in open_legs:
-                cs = contract_size(p.underlying)
+                cs = contract_size(p.subaccount_id, p.underlying)
                 fees_usd += _f(p.fee) * (_f(p.idx_px) or marker_price)
                 norm.append((_f(p.strike), p.opt_type, _f(p.size) * cs,
                              _f(p.avg_px) * (_f(p.idx_px) or marker_price), 0.0))
@@ -402,7 +580,7 @@ def payoff(underlying: str | None = None, expiry: str | None = None,
             "expiries": [e.isoformat() for e in expiries]}
 
 
-# ⑥ Analyze tab (live recompute from deal ledger) -------------------------- #
+# Ⓐ Analyze tab (live recompute from deal ledger) -------------------------- #
 @router.get("/analyze")
 def analyze(period: str = "all", underlying: str | None = None, strategy: int | None = None,
             subaccount: int | None = None, user: CurrentUser = Depends(get_current_user)) -> dict:

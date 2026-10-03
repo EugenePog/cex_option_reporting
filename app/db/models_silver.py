@@ -7,6 +7,9 @@ Strategy tagging is done ONCE per position leg (`position_leg`, key = OKX posId 
 manual pin (core.strategy_link) → strategy_rule → unassigned. Snapshots and closed positions
 inherit the leg's strategy_id (+ strategy_source); fills carry no strategy of their own — they
 link to their leg via `position_leg_id`.
+
+Market data: `index_candle` holds the typed 1-minute index candles (e.g. BTC-USD) from
+bronze.raw_index_candle — no account columns (added in 0021).
 """
 from __future__ import annotations
 
@@ -158,7 +161,7 @@ class TradeFill(Base):
 
 class Bill(Base):
     """Account ledger entries (parsed from bronze.raw_bill). Delivery rows (bill_type='3') carry
-    the underlying **settlement price** (`px`) at expiry — the source for report ②'s expiry marker."""
+    the underlying **settlement price** (`px`) at expiry — the source for report ③ (payoff)'s expiry marker."""
 
     __tablename__ = "bill"
     __table_args__ = (
@@ -283,3 +286,32 @@ class PositionLeg(Base):
         BigInteger, ForeignKey("core.strategy_link.id", ondelete="SET NULL"), nullable=True
     )
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IndexCandle(Base):
+    """Index candle (e.g. OKX BTC-USD index), 1 minute, typed from bronze.raw_index_candle.
+    Added in 0021.
+
+    Market data — no account columns. One row per (cex_code, inst_id, bar, ts); `ts` is the candle
+    OPEN time (UTC). Loaded incrementally: each run copies only bronze rows with an id above the
+    highest `bronze_id` already here, so a gap the collector fills later (a new bronze row with a
+    higher id) still reaches silver.
+    """
+
+    __tablename__ = "index_candle"
+    __table_args__ = (
+        UniqueConstraint("cex_code", "inst_id", "bar", "ts", name="uq_silver_index_candle"),
+        {"schema": SILVER},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cex_code: Mapped[str] = mapped_column(String(16))
+    inst_id: Mapped[str] = mapped_column(String(32))            # index, e.g. "BTC-USD"
+    bar: Mapped[str] = mapped_column(String(8))                 # "1m"
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))   # candle open time (UTC)
+    open: Mapped[float] = mapped_column(Numeric)
+    high: Mapped[float] = mapped_column(Numeric)
+    low: Mapped[float] = mapped_column(Numeric)
+    close: Mapped[float] = mapped_column(Numeric)
+    bronze_id: Mapped[int] = mapped_column(BigInteger, index=True)   # bronze.raw_index_candle.id
+    ingest_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

@@ -19,7 +19,8 @@ The current, still-forming minute is never stored (end bound = start of the curr
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -215,14 +216,40 @@ def make_index_candle_collector() -> IndexCandleCollector | None:
                                 CandleStore("OKX"), inst_ids)
 
 
+# Arbitrary app-wide key (int64) for pg_try_advisory_lock: one candle top-up at a time across the
+# collector processes — the snapshot and history schedulers both fire on the hour by default.
+CANDLE_SYNC_LOCK_KEY = 0x0CE0_CA4D
+
+
+@contextmanager
+def candle_sync_lock() -> Iterator[bool]:
+    """Try (don't wait) to take the candle-sync lock; yields True when this process got it."""
+    from app.db.base import engine
+
+    with engine.connect() as conn:
+        got = bool(conn.execute(text("SELECT pg_try_advisory_lock(:k)"),
+                                {"k": CANDLE_SYNC_LOCK_KEY}).scalar())
+        try:
+            yield got
+        finally:
+            if got:
+                conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": CANDLE_SYNC_LOCK_KEY})
+            conn.commit()
+
+
 def sync_index_candles(lookback_days: int) -> int:
     """Used by the snapshot / history collectors: never raises (market data must not break the
-    account collection). Returns the number of new candles."""
+    account collection). Returns the number of new candles. If the other collector is already
+    topping up the candles (same schedule), this one skips — it would fetch the same gaps."""
     try:
-        collector = make_index_candle_collector()
-        if collector is None:
-            return 0
-        return sum(r.written for r in collector.sync_recent(lookback_days))
+        with candle_sync_lock() as got:
+            if not got:
+                logger.info("index candles: another collector is topping them up — skipped")
+                return 0
+            collector = make_index_candle_collector()
+            if collector is None:
+                return 0
+            return sum(r.written for r in collector.sync_recent(lookback_days))
     except Exception:  # noqa: BLE001
         logger.exception("index candle sync failed; collectors continue")
         return 0

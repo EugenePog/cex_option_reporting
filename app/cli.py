@@ -1,8 +1,8 @@
 """Command-line entrypoints (Typer). pm2 and the Makefile call these.
 
     python -m app.cli init-db            # create tables (dev; prefer `alembic upgrade head`)
-    python -m app.cli snapshot [--loop]  # point-in-time data; --loop fires at SNAPSHOT_TIMES_UTC — pm2 module
-    python -m app.cli history  [--loop]  # fills/closed/bills; --loop once/day at INGEST_TIME_UTC — pm2 module
+    python -m app.cli snapshot [--loop]  # point-in-time data; --loop fires at SNAPSHOT_TIMES_UTC (default hourly)
+    python -m app.cli history  [--loop]  # fills/closed/bills; --loop fires at INGEST_TIME_UTC (default hourly)
     python -m app.cli backfill           # collect full available history once (manual)
     python -m app.cli index-candles [--since YYYY-MM-DD]  # BTC-USD 1m index candles (gaps only)
     python -m app.cli pipeline [--stage silver|gold|all] [--loop]  # transforms (default: all)
@@ -38,7 +38,8 @@ def seed(
     wipe_links: bool = typer.Option(
         False, help="With --replace: allow deleting the Box builder's manual strategy links."),
 ) -> None:
-    """Load core/settings CSVs (user, cex_account, subaccount, strategy, strategy_rule) into the DB."""
+    """Load core/settings CSVs (user, cex_account, subaccount, strategy, strategy_rule,
+    contract_size) into the DB."""
     setup_logging()
     from app.db.seed_loader import SeedReplaceWouldWipeLinks, load_seed
 
@@ -61,7 +62,7 @@ def snapshot(
     """Collect point-in-time data (balance/positions/margin/greeks) into bronze.
 
     Runs once for EVERY account in core.cex_account (or just --label). --loop runs the
-    scheduler that fires at each SNAPSHOT_TIMES_UTC time (several times/day), over all accounts.
+    scheduler that fires at each SNAPSHOT_TIMES_UTC time (default every hour), over all accounts.
     """
     setup_logging()
     if loop:
@@ -86,13 +87,14 @@ def snapshot(
 
 @app.command()
 def history(
-    loop: bool = typer.Option(False, help="Run the daily history scheduler (INGEST_TIME_UTC)."),
+    loop: bool = typer.Option(False, help="Run the history scheduler (INGEST_TIME_UTC, default hourly)."),
     label: str = typer.Option(None, help="Only this account label (default: all accounts)."),
 ) -> None:
     """Collect history (fills/closed-positions/bills) over a limited window into bronze.
 
     Runs once for EVERY account in core.cex_account (or just --label). --loop runs the
-    scheduler that fires once/day at INGEST_TIME_UTC, also over all accounts.
+    scheduler that fires at each INGEST_TIME_UTC time (default every hour), also over all
+    accounts.
     """
     setup_logging()
     if loop:

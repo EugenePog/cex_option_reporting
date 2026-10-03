@@ -12,6 +12,9 @@ Strategy tagging is per POSITION LEG (one OKX position lifecycle, key = posId + 
   3. position_snapshot / closed_position rows inherit the leg's strategy_id + strategy_source;
      trade_fill rows only link to their leg (position_leg_id), matched by subaccount + inst_id +
      fill time inside the leg's [cTime, uTime] window (domain/legs.match_fill_to_leg).
+
+Index candles (market data) are copied set-based and incrementally: only bronze.raw_index_candle
+rows with an id above the highest silver.index_candle.bronze_id (see _transform_index_candles).
 """
 from __future__ import annotations
 
@@ -21,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db.base import session_scope
@@ -472,6 +475,39 @@ def _transform_bills(s, lk: _Lookups) -> tuple[int, int]:
     return written, skipped
 
 
+_NUM = r"^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$"   # a plain decimal string, as OKX sends prices
+
+
+def _transform_index_candles(s) -> tuple[int, int]:
+    """bronze.raw_index_candle → silver.index_candle (typed OHLC), new bronze rows only.
+
+    Watermark = max(silver.index_candle.bronze_id): bronze ids only grow, so a minute the collector
+    back-fills later (a hole) arrives with a higher id and is still picked up. One INSERT … SELECT —
+    no rows go through Python. Rows whose o/h/l/c are not numbers are skipped (counted)."""
+    wm = s.execute(text("SELECT COALESCE(MAX(bronze_id), 0) FROM silver.index_candle")).scalar_one()
+    pending = s.execute(text(
+        "SELECT count(*) FROM bronze.raw_index_candle WHERE id > :wm"), {"wm": wm}).scalar_one()
+    if not pending:
+        return 0, 0
+    written = s.execute(text("""
+        INSERT INTO silver.index_candle
+               (cex_code, inst_id, bar, ts, open, high, low, close, bronze_id, ingest_id)
+        SELECT b.cex_code, b.inst_id, b.bar, b.ts,
+               (b.payload->>1)::numeric, (b.payload->>2)::numeric,
+               (b.payload->>3)::numeric, (b.payload->>4)::numeric, b.id, b.ingest_id
+          FROM bronze.raw_index_candle b
+         WHERE b.id > :wm
+           AND jsonb_typeof(b.payload) = 'array'
+           AND b.payload->>1 ~ :num AND b.payload->>2 ~ :num
+           AND b.payload->>3 ~ :num AND b.payload->>4 ~ :num
+        ON CONFLICT ON CONSTRAINT uq_silver_index_candle DO UPDATE
+           SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
+               close = EXCLUDED.close, bronze_id = EXCLUDED.bronze_id,
+               ingest_id = EXCLUDED.ingest_id
+    """), {"wm": wm, "num": _NUM}).rowcount
+    return written, pending - written
+
+
 def run() -> dict[str, tuple[int, int]]:
     """Run all bronze->silver transforms. Returns {table: (written, skipped_unresolved)}."""
     with session_scope() as s:
@@ -495,6 +531,7 @@ def run() -> dict[str, tuple[int, int]]:
             "trade_fill": _transform_fills(s, lk, legs, fill_legs),
             "closed_position": _transform_closed(s, lk, legs),
             "bill": _transform_bills(s, lk),
+            "index_candle": _transform_index_candles(s),
         }
         unlinked = sum(1 for k in fill_legs.values() if k is None)
         if unlinked:
@@ -502,6 +539,6 @@ def run() -> dict[str, tuple[int, int]]:
         pinned = sum(1 for lg in legs.values() if lg.link_id is not None)
         logger.info("silver position_leg: %d legs (%d pinned manually)", len(legs), pinned)
     for table, (written, skipped) in results.items():
-        logger.info("silver %s: %d written, %d skipped (unresolved subaccount)",
-                    table, written, skipped)
+        logger.info("silver %s: %d written, %d skipped (%s)", table, written, skipped,
+                    "not numeric" if table == "index_candle" else "unresolved subaccount")
     return results

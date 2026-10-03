@@ -36,3 +36,22 @@ def test_ingest_time_with_minutes():
 
 def test_ingest_time_bare_hour():
     assert _hist("10").ingest_time_tuple() == (10, 0)
+
+
+def test_hourly_wildcard():
+    assert _snap("*:00").snapshot_time_tuples() == [("*", 0)]
+    assert _hist("*:15").ingest_time_tuples() == [("*", 15)]
+    assert _snap("*:00, 06:30").snapshot_time_tuples() == [("*", 0), (6, 30)]
+
+
+def test_defaults_are_hourly(monkeypatch):
+    monkeypatch.delenv("SNAPSHOT_TIMES_UTC", raising=False)
+    monkeypatch.delenv("INGEST_TIME_UTC", raising=False)
+    s = Settings(_env_file=None)
+    assert s.snapshot_time_tuples() == [("*", 0)]
+    assert s.ingest_time_tuples() == [("*", 0)]
+
+
+def test_ingest_several_times_and_duplicates():
+    assert _hist("10:00,22:00,10:00").ingest_time_tuples() == [(10, 0), (22, 0)]
+    assert _hist("10:00,22:00").ingest_time_tuple() == (10, 0)

@@ -24,10 +24,10 @@ init-db:  ## Create schemas + tables from ORM metadata (dev; or use `make migrat
 seed:  ## Load core/settings CSVs from seed/ into the DB (upsert by id)
 	python -m app.cli seed
 
-collect-snapshot-loop:  ## Snapshot scheduler (balance/positions/margin/greeks + BTC-USD 1m index candles) — runs at SNAPSHOT_TIMES
+collect-snapshot-loop:  ## Snapshot scheduler (balance/positions/margin/greeks + BTC-USD 1m index candles) — SNAPSHOT_TIMES_UTC, default hourly
 	python -m app.cli snapshot --loop
 
-collect-loop:  ## History scheduler (fills/closed/bills + BTC-USD 1m index candles) — once/day at INGEST_HOUR_UTC, limited depth
+collect-loop:  ## History scheduler (fills/closed/bills + BTC-USD 1m index candles) — INGEST_TIME_UTC, default hourly, limited depth
 	python -m app.cli history --loop
 
 backfill:  ## Full history depth from the exchange, then BTC-USD 1m index candles from the earliest position (one-off)
@@ -45,7 +45,7 @@ pipeline-gold:  ## Run only silver->gold
 debug-expiries:  ## Trace closed/expired options across bronze/silver/gold (args: D1=YYYY-MM-DD D2=YYYY-MM-DD)
 	scripts/debug_expiries.sh $(D1) $(D2)
 
-debug-payoff:  ## Diagnose report 2 (payoff): expiry coverage + settlement-price gaps (arg: ULY=BTC-USD)
+debug-payoff:  ## Diagnose report ③ (payoff): expiry coverage + settlement-price gaps (arg: ULY=BTC-USD)
 	scripts/debug_payoff.sh $(ULY)
 
 web:  ## Run the web app (dev, autoreload)

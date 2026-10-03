@@ -1,4 +1,4 @@
--- Diagnose report ② (Payoff): which expiries exist, and whether a settlement (underlying) price
+-- Diagnose report ③ (Payoff): which expiries exist, and whether a settlement (underlying) price
 -- is available for each. Vars: uly (underlying), exp (a specific expiry to inspect).
 \if :{?uly}
 \else
@@ -9,7 +9,7 @@
 \echo '================ params ================'
 \echo 'underlying =' :'uly'
 
-\echo '\n===== 0. gold row counts relevant to report 2 ====='
+\echo '\n===== 0. gold row counts relevant to report 3 (payoff) ====='
 SELECT 'deal_ledger' t, count(*) FROM gold.deal_ledger
 UNION ALL SELECT 'underlying_price', count(*) FROM gold.underlying_price
 UNION ALL SELECT 'position_current', count(*) FROM gold.position_current;
@@ -24,12 +24,12 @@ SELECT 'gold.underlying_price', min(captured_at), max(captured_at) FROM gold.und
 UNION ALL
 SELECT 'gold.deal_ledger.closed_at', min(closed_at), max(closed_at) FROM gold.deal_ledger;
 
-\echo '\n===== 2. distinct expiries in deal_ledger (what report 2 CAN show for expired) ====='
+\echo '\n===== 2. distinct expiries in deal_ledger (what report 3 CAN show for expired) ====='
 SELECT expiry, count(*) legs, count(DISTINCT inst_id) insts,
        round(sum(realized_pnl)::numeric,6) realized, min(closed_at) first_close, max(closed_at) last_close
 FROM gold.deal_ledger WHERE expiry IS NOT NULL GROUP BY expiry ORDER BY expiry;
 
-\echo '\n===== 3. open positions (what report 2 shows by default) ====='
+\echo '\n===== 3. open positions (what report 3 shows by default) ====='
 SELECT inst_id, underlying, expiry, side, size, idx_px, captured_at
 FROM gold.position_current ORDER BY expiry, inst_id;
 

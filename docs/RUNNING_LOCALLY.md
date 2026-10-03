@@ -120,11 +120,11 @@ Uses the OKX_K_* account. Collection is split into two schedules plus a one-off 
 
 ```bash
 # Snapshot — point-in-time balance/positions/margin/greeks. Scheduler fires at each SNAPSHOT_TIMES_UTC
-# entry (default 00:00,06:00,12:00,18:00 UTC). Runs in the foreground:
+# entry (default "*:00" = every hour on the hour, UTC). Runs in the foreground:
 make collect-snapshot-loop       # == python -m app.cli snapshot --loop
 
 # History — fills/closed-positions/bills over a limited window (today + INGEST_DAILY_LOOKBACK_DAYS).
-# Scheduler fires once/day at INGEST_TIME_UTC (default 10:00 UTC):
+# Scheduler fires at each INGEST_TIME_UTC entry (default "*:00" = every hour; "10:00" = once a day):
 make collect-loop                # == python -m app.cli history --loop
 
 # Backfill — one-off, full available history depth (also snapshots current state), then the
@@ -177,10 +177,12 @@ python -m app.cli set-password you@example.com     # prompts for password
 make web                 # uvicorn app.web.main:app --reload  →  http://localhost:8000
 ```
 
-Open http://localhost:8000, sign in, and you'll see the **Dashboard** (reports ①–⑤: equity &
-daily P&L, strike×expiry map, greeks term structure, payoff, maturity ladder) and the **Analyze**
-tab (report ⑥: filter-driven KPIs, strategy table, symbol bars, deal drill-down). A `client` user
-sees only their own subaccounts; an `admin` sees all.
+Open http://localhost:8000, sign in, and you'll see the **Dashboard** (graphs ①–⑥: ① price with
+strategy boxes, ② equity & daily P&L (②b in-kind), ③ payoff, ④ strike×expiry map, ⑤ greeks term
+structure, ⑥ maturity ladder) and the **Analyze** tab (Ⓐ: filter-driven KPIs, strategy table, symbol
+bars, deal drill-down). The Underlying / Account selectors open on the values the graphs use (the
+underlying with the most legs; your only account, or all accounts). A `client` user sees only their
+own subaccounts; an `admin` sees all.
 
 > The dashboard reads the **gold** tables, so run `make pipeline` first (and keep the collectors
 > running) so there's data to show.
@@ -230,6 +232,29 @@ pm2 restart collector-snapshot collector-history   # loops now top up the candle
 ```bash
 docker exec -it cex_pg psql -U cex -d cex_option_reporting \
   -c "select inst_id, count(*), min(ts), max(ts) from bronze.raw_index_candle group by 1;"
+```
+
+### 10e. Price with strategy boxes + contract size in core (migrations 0020 + 0021)
+
+```bash
+make migrate                      # 0020: core.contract_size (+ OKX BTC/ETH/SOL option rows)
+                                  # 0021: silver/gold.index_candle, gold.box_shape, gold.position_leg cols
+make pipeline                     # first run types all candles + builds the 1h/4h/1d bars (seconds)
+pm2 restart pipeline web          # new pipeline steps + Dashboard graph ① "Price with strategy boxes"
+```
+
+Collectors: both schedules now default to **every hour on the hour** (`*:00`). If
+your `.env` sets `SNAPSHOT_TIMES_UTC` / `INGEST_TIME_UTC`, it overrides the default — set them to `*:00`
+(or delete the lines) and `pm2 restart collector-snapshot collector-history`.
+
+Contract sizes now live in `core.contract_size` (one row per exchange / instrument type / underlying).
+To change or add one, edit `seed/contract_size.csv` and run `python -m app.cli seed --table contract_size`,
+then `make pipeline`.
+
+```bash
+docker exec -it cex_pg psql -U cex -d cex_option_reporting \
+  -c "select bar, count(*), max(ts) from gold.index_candle group by 1;" \
+  -c "select subaccount_id, strategy_id, n_legs, size_coin, coin from gold.box_shape;"
 ```
 
 ---

@@ -2,7 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time, timezone
+
+# OKX crypto options expire (and settle) at 08:00 UTC on the expiry date.
+OPTION_SETTLE_UTC = time(8, 0)
+
+
+def expires_at(expiry: date | None) -> datetime | None:
+    """Expiration moment of an option: its expiry date at 08:00 UTC (OKX)."""
+    return datetime.combine(expiry, OPTION_SETTLE_UTC, tzinfo=timezone.utc) if expiry else None
 
 
 @dataclass

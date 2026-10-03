@@ -1,16 +1,9 @@
 """Black-76 pricer + intrinsic payoff."""
 from __future__ import annotations
 
-from app.domain.pricing import black76_price, contract_size, payoff_intrinsic
+from app.domain.pricing import black76_price, payoff_intrinsic
 
-
-def test_contract_size():
-    # OKX ctVal: BTC options = 0.01 BTC/contract, ETH = 0.1; unknown/None default to 1.0
-    assert contract_size("BTC-USD") == 0.01
-    assert contract_size("eth-usd") == 0.1
-    assert contract_size("SOL-USD") == 1.0
-    assert contract_size("DOGE-USD") == 1.0
-    assert contract_size(None) == 1.0
+# contract sizes moved to core.contract_size (0020) — see tests/domain/test_contracts.py
 
 
 def test_intrinsic():

@@ -3,6 +3,10 @@
 Gold is fully derived and **rebuilt** each run (truncate + insert) — simplest and always
 consistent at this scale. Reads only silver + core; never touches bronze.
 
+Exception: gold.index_candle (index price bars for the "Price with strategy boxes" chart) is market
+data that only grows, so it is updated incrementally — each run recomputes only the 1h / 4h / 1d
+bars that received new 1-minute candles in silver (see _build_index_candles).
+
 Definitions:
   * A "deal" = one silver.closed_position (realized, incl. expiry). realized_pnl is in the account
     settlement currency (coin) as OKX reports it.
@@ -18,11 +22,13 @@ from datetime import date, datetime, timezone
 from sqlalchemy import func, select, text
 
 from app.db.base import session_scope
+from app.db.contract_sizes import load_contract_sizes
 from app.db.models_core import CexAccount, Subaccount
 from app.db.models_gold import (
     AssetBalanceTimeseries,
     AssetPnlDaily,
     BalanceTimeseries,
+    BoxShape,
     ClientPerformance,
     ClientPnlDaily,
     DealLedger,
@@ -43,6 +49,9 @@ from app.db.models_silver import (
     PositionLeg,
     PositionSnapshot,
 )
+from app.domain.boxes import BAR_STEP, BARS, Leg, build_boxes
+from app.domain.contracts import ContractSizes, inst_type_of
+from app.domain.instruments import expires_at
 from app.domain.metrics import deal_metrics, equity_metrics
 
 logger = logging.getLogger(__name__)
@@ -51,8 +60,8 @@ _GOLD_TABLES = [  # truncated in this order at the start of each rebuild
     "balance_timeseries", "asset_balance_timeseries", "pnl_daily", "asset_pnl_daily",
     "strategy_summary", "deal_ledger", "position_current", "underlying_price",
     "expiry_settlement", "greeks_by_expiry", "client_pnl_daily", "client_performance",
-    "strategy_performance", "symbol_performance", "position_leg",
-]
+    "strategy_performance", "symbol_performance", "position_leg", "box_shape",
+]  # NOT index_candle: incremental (see _build_index_candles)
 
 
 def _fl(v) -> float:
@@ -100,7 +109,10 @@ def run() -> dict[str, int]:
         counts["greeks_by_expiry"] = _build_greeks_by_expiry(s)
         counts["strategy_summary"] = _build_strategy_summary(s, today)
         counts["deal_ledger"] = _build_deal_ledger(s, rates)
-        counts["position_leg"] = _build_position_leg(s, rates)
+        sizes = load_contract_sizes(s)   # contract size per exchange (core.contract_size)
+        counts["position_leg"], legs = _build_position_leg(s, rates, sizes)
+        counts["box_shape"] = _build_box_shape(s, legs, now)
+        counts["index_candle"] = _build_index_candles(s)
         counts["pnl_daily"] = _build_pnl_daily(s, rates)
         counts["client_pnl_daily"] = _build_client_pnl_daily(s, sub_user, eod)
         counts.update(_build_performance(s, sub_user, today, now, eod))
@@ -352,15 +364,30 @@ def _build_deal_ledger(s, rates: _CoinUsd) -> int:
     return n
 
 
-def _build_position_leg(s, rates: _CoinUsd) -> int:
+def _build_position_leg(s, rates: _CoinUsd, sizes: ContractSizes) -> tuple[int, list[Leg]]:
     """One row per silver.position_leg (Box builder read model) with USD P&L on the same basis as
-    deal_ledger (realized × close-day rate) and pnl_daily (unrealized × last-snapshot-day rate)."""
+    deal_ledger (realized × close-day rate) and pnl_daily (unrealized × last-snapshot-day rate).
+
+    For the price-with-boxes chart each row also gets its line end (`expires_at` = expiry 08:00 UTC)
+    and its size in coin (size × ct_val of its exchange / type / underlying from core.contract_size;
+    NULL when there is no such row). Returns (row count, the legs as domain objects for
+    box_shape)."""
     n = 0
+    legs: list[Leg] = []
     for lg in s.execute(select(PositionLeg)).scalars():
+        itype = inst_type_of(lg.inst_id)
+        ct_val = sizes.ct_val(lg.cex_code, lg.underlying, itype)
+        size_coin = (_fl(lg.size) * ct_val) if (ct_val is not None and lg.size is not None) \
+            else None
+        coin = sizes.coin(lg.cex_code, lg.underlying, itype) if lg.underlying else None
+        exp_at = expires_at(lg.expiry)
         r_real = rates.rate(lg.subaccount_id, lg.ccy, lg.closed_at.date()) if lg.closed_at else None
         seen = lg.last_seen_at or lg.pos_opened_at
         r_upl = rates.rate(lg.subaccount_id, lg.ccy or _asset_of(lg.underlying), seen.date()) \
             if seen else 1.0
+        realized_usd = (_fl(lg.realized_pnl) * r_real
+                        if lg.realized_pnl is not None and r_real is not None else None)
+        upl_usd = _fl(lg.upl) * r_upl if lg.upl is not None else None
         s.add(GoldPositionLeg(
             position_leg_id=lg.id, subaccount_id=lg.subaccount_id, strategy_id=lg.strategy_id,
             strategy_source=lg.strategy_source, rule_strategy_id=lg.rule_strategy_id,
@@ -370,13 +397,82 @@ def _build_position_leg(s, rates: _CoinUsd) -> int:
             exit_px=lg.exit_px, closed_at=lg.closed_at,
             close_type=_close_type(lg.close_type) if lg.close_type is not None else None,
             last_seen_at=lg.last_seen_at, realized_pnl=lg.realized_pnl,
-            realized_pnl_usd=(_fl(lg.realized_pnl) * r_real
-                              if lg.realized_pnl is not None and r_real is not None else None),
-            upl=lg.upl, upl_usd=(_fl(lg.upl) * r_upl if lg.upl is not None else None),
+            realized_pnl_usd=realized_usd, upl=lg.upl, upl_usd=upl_usd,
             fee=lg.fee, ccy=lg.ccy, n_fills=lg.n_fills, n_snapshots=lg.n_snapshots,
+            expires_at=exp_at, ct_val=ct_val, size_coin=size_coin, coin=coin,
+        ))
+        legs.append(Leg(
+            leg_id=lg.id, subaccount_id=lg.subaccount_id, strategy_id=lg.strategy_id,
+            underlying=lg.underlying, strike=float(lg.strike) if lg.strike is not None else None,
+            opened_at=lg.pos_opened_at, expires_at=exp_at, status=lg.status,
+            closed_at=lg.closed_at, last_seen_at=lg.last_seen_at,
+            size=float(lg.size) if lg.size is not None else None, size_coin=size_coin, coin=coin,
+            pnl_usd=realized_usd if realized_usd is not None else upl_usd,
         ))
         n += 1
-    return n
+    return n, legs
+
+
+def _build_box_shape(s, legs: list[Leg], now: datetime) -> int:
+    """One rectangle per (subaccount, strategy, underlying) — see app.domain.boxes.build_boxes."""
+    boxes = build_boxes(legs)
+    for b in boxes:
+        s.add(BoxShape(
+            subaccount_id=b.subaccount_id, strategy_id=b.strategy_id, underlying=b.underlying,
+            coin=b.coin, started_at=b.started_at, ends_at=b.ends_at, strike_lo=b.strike_lo,
+            strike_hi=b.strike_hi, n_legs=b.n_legs, n_open_legs=b.n_open_legs,
+            size_contracts=b.size_contracts, size_coin=b.size_coin, status=b.status,
+            net_pnl_usd=b.net_pnl_usd, leg_ids=b.leg_ids, updated_at=now,
+        ))
+    return len(boxes)
+
+
+_PG_INTERVAL = {"1h": "1 hour", "4h": "4 hours", "1d": "1 day"}
+assert set(_PG_INTERVAL) == set(BARS) == set(BAR_STEP)
+
+
+def _build_index_candles(s) -> int:
+    """silver.index_candle (1m) → gold.index_candle (1h / 4h / 1d), incrementally.
+
+    Per bar size: watermark = max(src_max_id) already in gold; the bars ("buckets", UTC
+    boundaries via date_bin) that contain a silver minute with a higher id are recomputed in full
+    from silver and upserted. A first run (empty gold) builds everything. Returns bars written."""
+    total = 0
+    for bar in BARS:
+        total += s.execute(text("""
+            WITH wm AS (
+                SELECT COALESCE(MAX(src_max_id), 0) AS id FROM gold.index_candle WHERE bar = :bar
+            ), touched AS (
+                SELECT DISTINCT c.cex_code, c.inst_id,
+                       date_bin(CAST(:step AS interval), c.ts,
+                                TIMESTAMPTZ '2000-01-01 00:00:00+00') AS b
+                  FROM silver.index_candle c, wm
+                 WHERE c.id > wm.id AND c.bar = '1m'
+            ), agg AS (
+                -- LATERAL: one index range scan per touched bar (a plain join makes the planner
+                -- match every minute of the instrument against every bar)
+                SELECT t.cex_code, t.inst_id, t.b AS ts, x.*
+                  FROM touched t
+                 CROSS JOIN LATERAL (
+                       SELECT (array_agg(c.open ORDER BY c.ts))[1] AS open,
+                              max(c.high) AS high, min(c.low) AS low,
+                              (array_agg(c.close ORDER BY c.ts DESC))[1] AS close,
+                              count(*) AS n_minutes, max(c.id) AS src_max_id
+                         FROM silver.index_candle c
+                        WHERE c.cex_code = t.cex_code AND c.inst_id = t.inst_id AND c.bar = '1m'
+                          AND c.ts >= t.b AND c.ts < t.b + CAST(:step AS interval)) x
+            )
+            INSERT INTO gold.index_candle
+                   (cex_code, inst_id, bar, ts, open, high, low, close, n_minutes, src_max_id,
+                    updated_at)
+            SELECT cex_code, inst_id, :bar, ts, open, high, low, close, n_minutes, src_max_id, now()
+              FROM agg
+            ON CONFLICT ON CONSTRAINT uq_gold_index_candle DO UPDATE
+               SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
+                   close = EXCLUDED.close, n_minutes = EXCLUDED.n_minutes,
+                   src_max_id = EXCLUDED.src_max_id, updated_at = EXCLUDED.updated_at
+        """), {"bar": bar, "step": _PG_INTERVAL[bar]}).rowcount
+    return total
 
 
 def _build_pnl_daily(s, rates: _CoinUsd) -> int:

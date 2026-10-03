@@ -1,10 +1,12 @@
 """Scheduled runners for the collectors — the long-lived pm2 processes.
 
-Two independent schedules:
-  * snapshot — point-in-time data, fires at each time in SNAPSHOT_TIMES_UTC (several times/day).
-  * history  — fills/closed/bills over a limited window, once/day at INGEST_TIME_UTC.
+Two independent schedules (UTC; a time "*:MM" = every hour at minute MM — the default for both is
+every hour on the hour):
+  * snapshot — point-in-time data, fires at each time in SNAPSHOT_TIMES_UTC.
+  * history  — fills/closed/bills over a limited window, fires at each time in INGEST_TIME_UTC.
 Both also top up the BTC-USD 1-minute index candles (bronze.raw_index_candle) after the accounts —
-market data, collected once per run (app.ingestion.index_candles).
+market data, collected once per run (app.ingestion.index_candles). When both fire at the same time,
+an advisory lock lets only one of them fetch the candles.
 
 pm2 keeps each process alive and restarts it on failure.
 """
@@ -44,33 +46,35 @@ def _run_history() -> None:
     sync_index_candles(settings.ingest_daily_lookback_days)          # never raises
 
 
-def run_snapshot_scheduler() -> None:
-    settings = get_settings()
-    scheduler = BlockingScheduler(timezone="UTC")
-    times = settings.snapshot_time_tuples()
+def _fmt(hour: int | str, minute: int) -> str:
+    return f"every hour at :{minute:02d}" if hour == "*" else f"{hour:02d}:{minute:02d}"
+
+
+def _add_jobs(scheduler, func, name: str, times: list[tuple[int | str, int]]) -> str:
+    """One cron job per configured time; '*' as hour = every hour."""
     for hour, minute in times:
+        hh = "xx" if hour == "*" else f"{hour:02d}"
         scheduler.add_job(
-            _run_snapshot,
+            func,
             trigger=CronTrigger(hour=hour, minute=minute, timezone="UTC"),
-            id=f"snapshot_{hour:02d}{minute:02d}",
+            id=f"{name}_{hh}{minute:02d}",
             max_instances=1,
             coalesce=True,
         )
-    pretty = ", ".join(f"{h:02d}:{m:02d}" for h, m in times)
-    logger.info("snapshot scheduler started — runs at %s UTC", pretty or "(no times configured)")
+    return ", ".join(_fmt(h, m) for h, m in times) or "(no times configured)"
+
+
+def run_snapshot_scheduler() -> None:
+    settings = get_settings()
+    scheduler = BlockingScheduler(timezone="UTC")
+    pretty = _add_jobs(scheduler, _run_snapshot, "snapshot", settings.snapshot_time_tuples())
+    logger.info("snapshot scheduler started — runs at %s UTC", pretty)
     scheduler.start()
 
 
 def run_history_scheduler() -> None:
     settings = get_settings()
-    hour, minute = settings.ingest_time_tuple()
     scheduler = BlockingScheduler(timezone="UTC")
-    scheduler.add_job(
-        _run_history,
-        trigger=CronTrigger(hour=hour, minute=minute, timezone="UTC"),
-        id="history_daily",
-        max_instances=1,
-        coalesce=True,
-    )
-    logger.info("history scheduler started — daily at %02d:%02d UTC", hour, minute)
+    pretty = _add_jobs(scheduler, _run_history, "history", settings.ingest_time_tuples())
+    logger.info("history scheduler started — runs at %s UTC", pretty)
     scheduler.start()

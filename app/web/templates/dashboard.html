@@ -12,7 +12,39 @@
 
 <div class="grid" style="margin-bottom:18px">
   <div class="card">
-    <h2>① Equity curve &amp; daily net P&amp;L
+    <h2>① Price with strategy boxes</h2>
+    <p class="hint">Index price with every box drawn on it: each line is an option leg at its strike, from
+      open time (tick) to expiry (tick) — closed early: a dot at the close, then dashed to expiry; the box
+      covers all its legs; the label is the box's total size. Below: total open size (legs count until
+      closed). Times in UTC.</p>
+    <div class="rpbar">
+      <label>Reporting period</label>
+      <select id="rp-pb">
+        <option value="all">All</option>
+        <option value="mtd">Month to date</option>
+        <option value="prevm">Previous month</option>
+        <option value="1m" selected>Last 1 month</option>
+        <option value="1w">Last 1 week</option>
+        <option value="manual">Manual input</option>
+      </select>
+      <label>From</label><input type="date" id="from-pb">
+      <label>Till</label><input type="date" id="till-pb">
+      <label>Candles</label>
+      <select id="pb-bar" style="min-width:90px">
+        <option value="auto" selected>Auto</option>
+        <option value="1h">1H</option>
+        <option value="4h">4H</option>
+        <option value="1d">1D</option>
+      </select>
+    </div>
+    <p class="hint" id="pb-meta" style="margin-top:-4px"></p>
+    <div id="c-pricebox" class="chart" style="height:580px"></div>
+  </div>
+</div>
+
+<div class="grid" style="margin-bottom:18px">
+  <div class="card">
+    <h2>② Equity curve &amp; daily net P&amp;L
       <label class="sync-toggle"><input type="checkbox" id="sync-1" checked> Sync timelines</label></h2>
     <p class="hint" id="equity-header">Account value over time · realized + unrealized per day.</p>
     <div class="rpbar">
@@ -35,7 +67,7 @@
 
 <div class="grid" style="margin-bottom:18px">
   <div class="card">
-    <h2>①b Asset equity &amp; daily net P&amp;L (in-kind)
+    <h2>②b Asset equity &amp; daily net P&amp;L (in-kind)
       <label class="sync-toggle"><input type="checkbox" id="sync-1b" checked> Sync timelines</label></h2>
     <p class="hint">Balance &amp; P&amp;L for a single asset, denominated in that asset.
       <select id="f-asset" style="min-width:110px;margin-left:8px"></select>
@@ -59,7 +91,7 @@
 </div>
 
 <div class="grid" style="margin-bottom:18px">
-  <div class="card"><h2>② Payoff / risk profile</h2>
+  <div class="card"><h2>③ Payoff / risk profile</h2>
     <p class="hint">Combined P&amp;L vs price on expiration date
       <input type="date" id="f-expiry" list="expiry-list" style="min-width:auto;width:150px;margin-left:8px">
       <datalist id="expiry-list"></datalist>
@@ -67,13 +99,13 @@
 </div>
 
 <div class="grid cols-2">
-  <div class="card"><h2>③ Strike × expiry position map</h2>
+  <div class="card"><h2>④ Strike × expiry position map</h2>
     <p class="hint">Net contracts — blue long / red short. Dashed line = spot.</p>
     <div id="c-map" class="chart tall"></div></div>
-  <div class="card"><h2>④ Greeks term structure</h2>
+  <div class="card"><h2>⑤ Greeks term structure</h2>
     <p class="hint">Net vega ($/vol pt) and net theta ($/day) by expiry.</p>
     <div id="c-greeks" class="chart tall"></div></div>
-  <div class="card"><h2>⑤ Maturity ladder</h2>
+  <div class="card"><h2>⑥ Maturity ladder</h2>
     <p class="hint">Premium at risk by expiry — calls vs puts.</p>
     <div id="c-ladder" class="chart tall"></div></div>
 </div>
@@ -83,21 +115,31 @@ const state = { underlying: "", subaccount: "" };
 
 async function boot() {
   const f = await api("/filters"); if (!f) return;
-  fillSelect(document.getElementById("f-underlying"), f.underlyings, { blank: "All" });
+  // Fill the selectors with the values the graphs will actually use, THEN draw: the server's
+  // defaults (underlying with the most legs; the only account, or all accounts) are applied to
+  // state first, so the page never shows "All" while a graph silently picks something else.
+  const def = f.defaults || {};
+  fillSelect(document.getElementById("f-underlying"), f.underlyings);   // one underlying at a time
   fillSelect(document.getElementById("f-subaccount"),
              f.subaccounts.map(id => ({id, name:"Account "+id})), {value:"id",label:"name",blank:"All"});
+  state.underlying = def.underlying || f.underlyings[0] || "";
+  state.subaccount = def.subaccount != null ? String(def.subaccount) : "";
+  document.getElementById("f-underlying").value = state.underlying;
+  document.getElementById("f-subaccount").value = state.subaccount;
   fillSelect(document.getElementById("f-asset"), f.assets || []);
   document.getElementById("f-underlying").onchange = e => { state.underlying = e.target.value; renderBook(); };
   document.getElementById("f-subaccount").onchange = e => { state.subaccount = e.target.value; renderAll(); };
   document.getElementById("f-asset").onchange = () => renderAssetEquity();
   document.getElementById("f-expiry").onchange = () => renderPayoff();
+  document.getElementById("pb-bar").onchange = () => renderPriceBoxes();
+  setupPeriod("pb", renderPriceBoxes);  // same presets / default (Last 1 month) as graph ②
   document.getElementById("sync-1").onchange = () => renderEquity();
   document.getElementById("sync-1b").onchange = () => renderAssetEquity();
   setupPeriod("1", renderEquity);       // sets default (1m) from/till before first render
   setupPeriod("1b", renderAssetEquity);
   renderAll();
 }
-function renderAll(){ renderEquity(); renderAssetEquity(); renderBook(); }
+function renderAll(){ renderEquity(); renderAssetEquity(); renderBook(); }   // renderBook draws ① too
 
 // --- reporting-period control (preset combobox + from/till calendars) ---
 function ymd(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
@@ -150,7 +192,157 @@ async function renderAssetEquity(){
     margin:{l:80,r:16,t:6,b:30} }), CFG);
   if (synced) linkX("c-asset-equity", "c-asset-pnl");
 }
-function renderBook(){ renderMap(); renderGreeks(); renderLadder(); renderPayoff(true); }
+function renderBook(){ renderPriceBoxes(); renderMap(); renderGreeks(); renderLadder(); renderPayoff(true); }
+
+// --- ① Price with strategy boxes (GET /api/price-boxes) ---------------------------------------
+const PB_PALETTE = ["#3987e5", "#9b7be0", "#36c5d8", "#e2632a", "#22c55e", "#eab308"];
+function rgba(hex, a){
+  let h = (hex || "#888888").replace("#", "");
+  if (h.length === 3) h = h.split("").map(c => c + c).join("");
+  const n = parseInt(h, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+const escH = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtPx = v => v == null ? "–" : Number(v).toLocaleString(undefined, {maximumFractionDigits: 1});
+const fmtCoin = (v, c) => v == null ? "–" : String(+Number(v).toFixed(8)) + (c ? " " + c : "");
+const fmtUtc = iso => iso ? iso.slice(0, 16).replace("T", " ") + " UTC" : "–";
+// Plotly date axes ignore time zones: pass the UTC wall time without the offset.
+const plotT = iso => iso ? String(iso).replace(/(Z|[+-]00:00)$/, "") : iso;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const midT = (a, b) => new Date((Date.parse(a) + Date.parse(b)) / 2).toISOString();
+
+const pbLabel = col => ({bgcolor: "#1b1f26", bordercolor: col, font: {color: "#e6edf7", size: 12}});
+function pbBoxHover(b){
+  return `<b>${escH(b.legend)}</b><br>${b.n_legs} legs (${b.n_open_legs} open) · total ${escH(b.label)}` +
+    `<br>${fmtUtc(b.started_at)} → ${fmtUtc(b.ends_at)}` +
+    `<br>strikes ${fmtPx(b.strike_lo)} – ${fmtPx(b.strike_hi)}` +
+    (b.net_pnl_usd != null ? `<br>P&L ${usd(b.net_pnl_usd, 2)}` : "");
+}
+function pbLegHover(l, b){
+  const end = l.status === "closed"
+    ? (l.close_type === "expiry" ? "expired" : "closed " + fmtUtc(l.closed_at))
+    : (l.status === "open" ? "open" : "gone from snapshots");
+  return `<b>${escH(l.inst_id)}</b><br>${escH(l.side || "")} ${fmtPx(l.size)} · ${fmtCoin(l.size_coin, l.coin)}` +
+    `<br>opened ${fmtUtc(l.opened_at)}<br>expiry ${fmtUtc(l.expires_at)} · ${end}` +
+    (l.pnl_usd != null ? `<br>P&L ${usd(l.pnl_usd, 2)}` : "") + (b ? `<br>box: ${escH(b.name)}` : "");
+}
+
+async function renderPriceBoxes(){
+  const d = await api("/price-boxes", { underlying: state.underlying, subaccount: state.subaccount,
+                                        bar: document.getElementById("pb-bar").value,
+                                        ...periodParams("pb") });
+  if (!d) return;
+  const last = d.last, lastC = d.candles.length ? d.candles[d.candles.length - 1] : null;
+  document.getElementById("pb-meta").innerHTML = d.underlying
+    ? `<b style="color:#e6edf7">${escH(d.underlying)}</b> index (${escH(d.cex_code || "–")}) · ` +
+      `${d.bar.toUpperCase()} candles${d.bar_auto ? " (auto)" : ""}` +
+      (last ? ` · last <b style="color:#e6edf7">${fmtPx(last.close)}</b> at ${fmtUtc(last.t)}` : "") +
+      ` · ${plural(d.boxes.filter(b => !b.is_unassigned).length, "box", "boxes")}, ` +
+      `${plural(d.legs.length, "leg", "legs")} in the period`
+    : "No index price data for this selection (see INDEX_CANDLE_INST_IDS).";
+  if (!d.candles.length && !d.boxes.length) { Plotly.purge("c-pricebox"); return; }
+
+  const traces = [], shapes = [], ann = [];
+  if (d.candles.length) traces.push({
+    type: "candlestick", name: d.underlying, showlegend: false, xaxis: "x", yaxis: "y",
+    x: d.candles.map(c => plotT(c.t)), open: d.candles.map(c => c.o), high: d.candles.map(c => c.h),
+    low: d.candles.map(c => c.l), close: d.candles.map(c => c.c),
+    increasing: {line: {color: "#26a69a", width: 1}, fillcolor: "#26a69a"},
+    decreasing: {line: {color: "#ef5350", width: 1}, fillcolor: "#ef5350"},
+  });
+
+  // Boxes: thin rectangle exactly around the legs (no padding) + one bold line per leg at its
+  // strike, open → expiry, with a tick (serif) at both ends. A leg closed early is solid up to the
+  // close, has a dot there, and continues dashed to its expiry. All traces of a box share one
+  // legend group, so a legend click hides the whole box.
+  d.boxes.forEach((b, i) => {
+    const col = b.is_unassigned ? "#8b93a1" : (b.color || PB_PALETTE[i % PB_PALETTE.length]);
+    const grp = "box" + b.key;
+    if (!b.is_unassigned) {
+      const x0 = plotT(b.started_at), x1 = plotT(b.ends_at);
+      traces.push({type: "scatter", mode: "lines", name: b.legend, legendgroup: grp, showlegend: true,
+        x: [x0, x1, x1, x0, x0], y: [b.strike_lo, b.strike_lo, b.strike_hi, b.strike_hi, b.strike_lo],
+        fill: "toself", fillcolor: rgba(col, 0.07), line: {color: col, width: 1},
+        hoveron: "fills", hoverinfo: "text", text: pbBoxHover(b), hoverlabel: pbLabel(col)});
+      // label at the box's left edge, or at the left edge of the view when the box starts before it
+      const lx = Date.parse(b.started_at) < Date.parse(d.range[0]) ? plotT(d.range[0]) : x0;
+      ann.push({x: lx, y: b.strike_hi, xanchor: "left", yanchor: "bottom", showarrow: false, xshift: 2,
+        text: `<b>${escH(b.label)}</b>  ${escH(b.name)}`, font: {color: col, size: 11},
+        bgcolor: "rgba(20,23,28,0.75)", borderpad: 2});
+    }
+    const solid = {x: [], y: [], t: []}, dash = {x: [], y: []}, dots = {x: [], y: [], t: []},
+          ticks = {x: [], y: []};
+    for (const l of d.legs.filter(l => l.box === b.key)) {
+      const a = l.opened_at, e = l.expires_at || l.closed_at || a, k = l.strike, h = pbLegHover(l, b);
+      const se = l.closed_early ? l.closed_at : e;          // the solid part ends at an early close
+      solid.x.push(plotT(a), plotT(midT(a, se)), plotT(se), null);
+      solid.y.push(k, k, k, null); solid.t.push(h, h, h, null);
+      if (l.closed_early) {
+        dash.x.push(plotT(se), plotT(e), null); dash.y.push(k, k, null);
+        dots.x.push(plotT(se)); dots.y.push(k); dots.t.push(h);
+      }
+      ticks.x.push(plotT(a), plotT(e)); ticks.y.push(k, k);
+    }
+    const legName = b.is_unassigned ? b.legend + " — legs without a box" : b.legend;
+    if (solid.x.length) traces.push({type: "scatter", mode: "lines", x: solid.x, y: solid.y,
+      text: solid.t, hoverinfo: "text", hoverlabel: pbLabel(col), connectgaps: false,
+      line: {color: col, width: 3}, legendgroup: grp, name: legName, showlegend: !!b.is_unassigned});
+    if (dash.x.length) traces.push({type: "scatter", mode: "lines", x: dash.x, y: dash.y,
+      hoverinfo: "skip", connectgaps: false, line: {color: col, width: 2, dash: "dash"},
+      legendgroup: grp, name: legName, showlegend: false});
+    if (ticks.x.length) traces.push({type: "scatter", mode: "markers", x: ticks.x, y: ticks.y,
+      hoverinfo: "skip", legendgroup: grp, name: legName, showlegend: false,
+      marker: {symbol: "line-ns-open", size: 13, color: col, line: {color: col, width: 2}}});
+    if (dots.x.length) traces.push({type: "scatter", mode: "markers", x: dots.x, y: dots.y,
+      text: dots.t, hoverinfo: "text", hoverlabel: pbLabel(col), legendgroup: grp, name: legName,
+      showlegend: false, marker: {symbol: "circle", size: 10, color: col,
+                                  line: {color: "#14171c", width: 1.5}}});
+  });
+
+  // Total open size (coin) under the candles: exact step line; dashed lines only where the level
+  // really changes — brief blips (e.g. minutes between an expiry and the next roll) are ignored by
+  // comparing the segments that last at least ~0.8% of the range; totals written on wide segments.
+  const ex = d.exposure, span = Date.parse(d.range[1]) - Date.parse(d.range[0]);
+  if (ex.length) {
+    const xs = ex.map(sg => plotT(sg.t0)).concat([plotT(ex[ex.length - 1].t1)]);
+    const ys = ex.map(sg => sg.total).concat([ex[ex.length - 1].total]);
+    traces.push({type: "scatter", mode: "lines", x: xs, y: ys, xaxis: "x", yaxis: "y2",
+      line: {shape: "hv", color: "#f39c33", width: 1.5}, fill: "tozeroy",
+      fillcolor: "rgba(243,156,51,0.12)", name: "Total open size", showlegend: false,
+      hovertemplate: "total open %{y} " + (d.coin || "") + "<extra></extra>"});
+    const wide = ex.filter(sg => Date.parse(sg.t1) - Date.parse(sg.t0) >= span * 0.008);
+    // merge consecutive wide segments with the same total into one level
+    const levels = [];
+    for (const sg of wide) {
+      const lv = levels[levels.length - 1];
+      if (lv && Math.abs(lv.total - sg.total) < 1e-9) lv.t1 = sg.t1;
+      else levels.push({t0: sg.t0, t1: sg.t1, total: sg.total});
+    }
+    levels.forEach((lv, i) => {
+      if (i > 0)
+        shapes.push({type: "line", xref: "x", x0: plotT(lv.t0), x1: plotT(lv.t0), yref: "y2 domain",
+          y0: 0, y1: 1, line: {color: "rgba(230,237,247,0.4)", width: 1, dash: "dash"}});
+      if (Date.parse(lv.t1) - Date.parse(lv.t0) >= span * 0.06)
+        ann.push({x: plotT(midT(lv.t0, lv.t1)), y: lv.total, xref: "x", yref: "y2", yanchor: "bottom",
+          showarrow: false, text: fmtCoin(lv.total, d.coin), font: {color: "#f39c33", size: 10}});
+    });
+  }
+  shapes.push({type: "line", xref: "x", x0: plotT(d.now), x1: plotT(d.now), yref: "paper", y0: 0, y1: 1,
+    line: {color: "#8b93a1", width: 1, dash: "dot"}});
+  if (last) ann.push({xref: "paper", x: 1, y: last.close, yref: "y", xanchor: "left", showarrow: false,
+    text: fmtPx(last.close), font: {color: "#fff", size: 11}, borderpad: 3,
+    bgcolor: (lastC && lastC.c < lastC.o) ? "#ef5350" : "#26a69a"});
+
+  Plotly.newPlot("c-pricebox", traces, layout({
+    xaxis: {type: "date", range: [plotT(d.range[0]), plotT(d.range[1])], rangeslider: {visible: false},
+            anchor: "y2"},
+    yaxis: {domain: [0.2, 1], side: "right", tickformat: ",.0f"},
+    yaxis2: {domain: [0, 0.15], side: "right", rangemode: "tozero", tickformat: ".2~f",
+             title: {text: d.coin || ""}, gridcolor: "#232833", zerolinecolor: "#333"},
+    shapes, annotations: ann, legend: {orientation: "h", y: 1.07, x: 0},
+    margin: {l: 16, r: 78, t: 26, b: 30}, hovermode: "closest", hoverlabel: {align: "left"},
+  }), CFG);
+}
 
 async function renderEquity() {
   const pp = periodParams("1");
@@ -260,7 +452,7 @@ async function renderPayoff(resetExpiry) {
   ];
   if (!expiredNote && d.t0 && d.t0.length)  // T+0 reprice only meaningful for still-open legs
     traces.push({x:g,y:d.t0,type:"scatter",mode:"lines",name:"P&L today (T+0)",line:{color:COL.orange,width:2,dash:"dash"}});
-  // Expired: mark the REAL OKX realized P&L (gold.deal_ledger, = report ①a) at the settlement price.
+  // Expired: mark the REAL OKX realized P&L (gold.deal_ledger, = graph ② net P&L) at the settlement price.
   if (expiredNote && d.realized_usd!=null && m && m.value!=null){
     const rv = d.realized_usd, rvTxt = (rv<0?"-$":"$")+Math.abs(rv).toFixed(2);
     traces.push({x:[m.value],y:[rv],type:"scatter",mode:"markers+text",name:"Realized P&L (actual)",

@@ -2,4 +2,4 @@ id,subaccount_id,name,description,color
 1,1,daily-short-straddle,Daily short straddle,#4c9aff
 2,1,unassigned,Fallback bucket for unmatched positions,#888888
 9,4,unassigned,Fallback bucket for unmatched positions,#888888
-10,5,unassigned,Fallback bucket for unmatched positions,#888888
+12,5,unassigned,Fallback bucket for unmatched positions,#888888

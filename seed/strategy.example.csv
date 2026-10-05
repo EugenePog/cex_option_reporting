@@ -6,4 +6,4 @@ id,subaccount_id,name,description,color
 5,3,holding,Holding assets,#4c9aff
 6,3,unassigned,Fallback bucket for unmatched positions,#888888
 9,4,unassigned,Fallback bucket for unmatched positions,#888888
-10,5,unassigned,Fallback bucket for unmatched positions,#888888
+12,5,unassigned,Fallback bucket for unmatched positions,#888888

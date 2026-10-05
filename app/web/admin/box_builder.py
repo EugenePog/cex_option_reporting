@@ -44,6 +44,7 @@ from app.db.models_core import (
 )
 from app.db.models_gold import PositionLeg as GoldLeg
 from app.db.models_silver import ClosedPosition, PositionLeg, PositionSnapshot, TradeFill
+from app.web.accounts import account_options
 from app.web.deps import CurrentUser, require_admin
 
 logger = logging.getLogger(__name__)
@@ -112,13 +113,7 @@ def _rc_status() -> dict:
 # Read helpers
 # --------------------------------------------------------------------------- #
 def _subaccounts(s) -> list[dict]:
-    rows = s.execute(
-        select(Subaccount.id, Subaccount.display_name, Subaccount.subacct_name, CexAccount.label,
-               CexAccount.cex_code)
-        .join(CexAccount, CexAccount.id == Subaccount.cex_account_id).order_by(Subaccount.id)
-    ).all()
-    return [{"id": sid, "label": f"{label} · {disp or sub_name or 'main'}", "cex_code": cex}
-            for sid, disp, sub_name, label, cex in rows]
+    return account_options(s)            # same account names as the Dashboard and Analyze tabs
 
 
 def _check_sub(user: CurrentUser, subaccount_id: int) -> None:

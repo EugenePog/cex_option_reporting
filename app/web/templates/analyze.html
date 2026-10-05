@@ -51,7 +51,7 @@ async function boot(){
   const f = await api("/filters"); if(!f) return;
   fillSelect(document.getElementById("f-underlying"), f.underlyings, {blank:"All symbols"});
   fillSelect(document.getElementById("f-strategy"), f.strategies, {value:"id",label:"name",blank:"All strategies"});
-  fillSelect(document.getElementById("f-subaccount"), f.subaccounts.map(id=>({id,name:"Account "+id})), {value:"id",label:"name",blank:"All accounts"});
+  fillSelect(document.getElementById("f-subaccount"), f.accounts.map(a=>({id:a.id,name:a.label})), {value:"id",label:"name",blank:"All accounts"});
   for (const [id,key] of [["f-underlying","underlying"],["f-strategy","strategy"],["f-subaccount","subaccount"],["f-period","period"]])
     document.getElementById(id).onchange = e => { state[key]=e.target.value; refresh(); };
   refresh();

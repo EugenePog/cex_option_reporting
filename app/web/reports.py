@@ -45,6 +45,7 @@ from app.domain.boxes import (
 from app.domain.metrics import deal_metrics, equity_metrics
 from app.domain.instruments import OPTION_SETTLE_UTC as OKX_SETTLE_UTC  # 08:00 UTC on expiry day
 from app.domain.pricing import black76_price, payoff_intrinsic
+from app.web.accounts import account_labels, account_options
 from app.web.deps import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/api", tags=["reports"])
@@ -122,11 +123,13 @@ def filters(user: CurrentUser = Depends(get_current_user)) -> dict:
         cexes = select(Subaccount.cex_code).where(Subaccount.id.in_(subs))
         priced = {u for (u,) in s.execute(
             select(IndexCandle.inst_id).where(IndexCandle.cex_code.in_(cexes)).distinct())}
+        # account names for the Account selectors — the same names as on the Box builder
+        accounts = [{"id": a["id"], "label": a["label"]} for a in account_options(s, subs)]
     underlyings = sorted(set(underlyings) | set(leg_counts) | priced)
     default_ul = (min(underlyings, key=lambda u: (-leg_counts.get(u, 0), u))
                   if underlyings else None)
     return {"underlyings": underlyings, "strategies": strategies, "assets": assets,
-            "subaccounts": subs, "is_admin": user.is_admin,
+            "subaccounts": subs, "accounts": accounts, "is_admin": user.is_admin,
             "periods": ["mtd", "ytd", "all", "7d", "30d", "90d"],
             "defaults": {"underlying": default_ul,
                          "subaccount": subs[0] if len(subs) == 1 else ""}}
@@ -246,6 +249,7 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
         meta = {sid: (name, color) for sid, name, color in s.execute(
             select(Strategy.id, Strategy.name, Strategy.color)
             .where(Strategy.id.in_({b.strategy_id for b in boxes if b.strategy_id})))}
+        acct = account_labels(s, {b.subaccount_id for b in boxes})
 
         # visible time range: the period (till inclusive → next midnight) if given; otherwise all
         # boxes (first open → last expiry) and now; with no boxes, the last 30 days
@@ -286,7 +290,8 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
         out_boxes.append({
             "key": i, "strategy_id": b.strategy_id, "subaccount_id": b.subaccount_id,
             "name": name, "color": color, "is_unassigned": name == "unassigned",
-            "legend": f"{name} · Account {b.subaccount_id}" if multi_acct else name,
+            "legend": (f"{name} · {acct.get(b.subaccount_id, b.subaccount_id)}" if multi_acct
+                       else name),
             "started_at": _iso(b.started_at), "ends_at": _iso(b.ends_at),
             "strike_lo": _num(b.strike_lo), "strike_hi": _num(b.strike_hi),
             "n_legs": b.n_legs, "n_open_legs": b.n_open_legs, "status": b.status,

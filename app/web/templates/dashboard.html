@@ -122,7 +122,7 @@ async function boot() {
   const def = f.defaults || {};
   fillSelect(document.getElementById("f-underlying"), f.underlyings);   // one underlying at a time
   fillSelect(document.getElementById("f-subaccount"),
-             f.subaccounts.map(id => ({id, name:"Account "+id})), {value:"id",label:"name",blank:"All"});
+             f.accounts.map(a => ({id: a.id, name: a.label})), {value:"id",label:"name",blank:"All"});
   state.underlying = def.underlying || f.underlyings[0] || "";
   state.subaccount = def.subaccount != null ? String(def.subaccount) : "";
   document.getElementById("f-underlying").value = state.underlying;

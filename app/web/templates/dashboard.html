@@ -14,9 +14,10 @@
   <div class="card">
     <h2>① Price with strategy boxes</h2>
     <p class="hint">Index price with every box drawn on it: each line is an option leg at its strike, from
-      open time (tick) to expiry (tick) — closed early: a dot at the close, then dashed to expiry; the box
-      covers all its legs; the label is the box's total size. Below: total open size (legs count until
-      closed). Times in UTC.</p>
+      open time (tick) to expiry (tick) — closed early: a dot at the close, then dashed to expiry; the shaded
+      side is where the leg pays off — above a call, below a put; green = bought, red = sold. The box covers
+      all its legs; the label is the box's total size. Below: total open size (legs count until closed).
+      Times in UTC.</p>
     <div class="rpbar">
       <label>Reporting period</label>
       <select id="rp-pb">
@@ -209,6 +210,10 @@ const fmtUtc = iso => iso ? iso.slice(0, 16).replace("T", " ") + " UTC" : "–";
 // Plotly date axes ignore time zones: pass the UTC wall time without the offset.
 const plotT = iso => iso ? String(iso).replace(/(Z|[+-]00:00)$/, "") : iso;
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// Leg areas: bought (long) = green, sold (short) = red; drawn as PB_AREA_STEPS nested bands so the
+// opacity is 40% at the line (60% transparent) and fades out away from it.
+const PB_BUY = "34,197,94", PB_SELL = "239,68,68", PB_AREA_STEPS = 6, PB_AREA_ALPHA = 0.40;
+const PB_AREA_LAYER = 1 - Math.pow(1 - PB_AREA_ALPHA, 1 / PB_AREA_STEPS);   // per nested band
 const midT = (a, b) => new Date((Date.parse(a) + Date.parse(b)) / 2).toISOString();
 
 const pbLabel = col => ({bgcolor: "#1b1f26", bordercolor: col, font: {color: "#e6edf7", size: 12}});
@@ -251,6 +256,15 @@ async function renderPriceBoxes(){
     decreasing: {line: {color: "#ef5350", width: 1}, fillcolor: "#ef5350"},
   });
 
+  // Height of the leg areas: 4% of the price span on screen (candles + box strikes).
+  const ySpan = (() => {
+    let lo = Infinity, hi = -Infinity;
+    for (const c of d.candles) { lo = Math.min(lo, c.l); hi = Math.max(hi, c.h); }
+    for (const b of d.boxes) { lo = Math.min(lo, b.strike_lo); hi = Math.max(hi, b.strike_hi); }
+    return hi > lo ? hi - lo : Math.abs(hi) * 0.1 || 1;
+  })();
+  const areaH = ySpan * 0.04;
+
   // Boxes: thin rectangle exactly around the legs (no padding) + one bold line per leg at its
   // strike, open → expiry, with a tick (serif) at both ends. A leg closed early is solid up to the
   // close, has a dot there, and continues dashed to its expiry. All traces of a box share one
@@ -271,10 +285,22 @@ async function renderPriceBoxes(){
         bgcolor: "rgba(20,23,28,0.75)", borderpad: 2});
     }
     const solid = {x: [], y: [], t: []}, dash = {x: [], y: []}, dots = {x: [], y: [], t: []},
-          ticks = {x: [], y: []};
+          ticks = {x: [], y: []}, areas = {};
     for (const l of d.legs.filter(l => l.box === b.key)) {
       const a = l.opened_at, e = l.expires_at || l.closed_at || a, k = l.strike, h = pbLegHover(l, b);
       const se = l.closed_early ? l.closed_at : e;          // the solid part ends at an early close
+      // payoff side while the leg is held (open → expiry, or → the early close): above a call,
+      // below a put; green bought, red sold — nested bands, all starting at the line
+      const ot = (l.opt_type || "").toUpperCase(), sd = (l.side || "").toLowerCase();
+      if ((ot === "C" || ot === "P") && (sd === "long" || sd === "short")) {
+        const dir = ot === "C" ? 1 : -1, rgb = sd === "long" ? PB_BUY : PB_SELL;
+        for (let i = 0; i < PB_AREA_STEPS; i++) {
+          const ar = areas[rgb + "|" + i] || (areas[rgb + "|" + i] = {rgb, x: [], y: []});
+          const y1 = k + dir * areaH * (PB_AREA_STEPS - i) / PB_AREA_STEPS;
+          ar.x.push(plotT(a), plotT(se), plotT(se), plotT(a), plotT(a), null);
+          ar.y.push(k, k, y1, y1, k, null);
+        }
+      }
       solid.x.push(plotT(a), plotT(midT(a, se)), plotT(se), null);
       solid.y.push(k, k, k, null); solid.t.push(h, h, h, null);
       if (l.closed_early) {
@@ -284,6 +310,10 @@ async function renderPriceBoxes(){
       ticks.x.push(plotT(a), plotT(e)); ticks.y.push(k, k);
     }
     const legName = b.is_unassigned ? b.legend + " — legs without a box" : b.legend;
+    for (const ar of Object.values(areas))                   // under the lines
+      traces.push({type: "scatter", mode: "lines", x: ar.x, y: ar.y, fill: "toself",
+        fillcolor: `rgba(${ar.rgb},${PB_AREA_LAYER.toFixed(4)})`, line: {width: 0},
+        connectgaps: false, hoverinfo: "skip", legendgroup: grp, name: legName, showlegend: false});
     if (solid.x.length) traces.push({type: "scatter", mode: "lines", x: solid.x, y: solid.y,
       text: solid.t, hoverinfo: "text", hoverlabel: pbLabel(col), connectgaps: false,
       line: {color: col, width: 3}, legendgroup: grp, name: legName, showlegend: !!b.is_unassigned});

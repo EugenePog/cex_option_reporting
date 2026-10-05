@@ -3,3 +3,4 @@ id,cex_account_id,cex_code,subacct_name,display_name,is_active
 2,2,OKX,,Hedge,true
 3,3,OKX,,Main,true
 4,4,OKX,,Box_management_1,true
+5,5,OKX,,Box management half-prod,true

@@ -45,7 +45,7 @@ from app.domain.boxes import (
 from app.domain.metrics import deal_metrics, equity_metrics
 from app.domain.instruments import OPTION_SETTLE_UTC as OKX_SETTLE_UTC  # 08:00 UTC on expiry day
 from app.domain.pricing import black76_price, payoff_intrinsic
-from app.web.accounts import account_labels, account_options
+from app.web.accounts import account_labels, account_options, account_underlyings
 from app.web.deps import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/api", tags=["reports"])
@@ -94,11 +94,9 @@ def _period_start(period: str, today: date) -> date | None:
 def filters(user: CurrentUser = Depends(get_current_user)) -> dict:
     subs = user.subaccount_ids
     with SessionLocal() as s:
-        underlyings = sorted({u for (u,) in s.execute(
-            select(PositionCurrent.underlying).where(PositionCurrent.subaccount_id.in_(subs))
-        ) if u} | {u for (u,) in s.execute(
-            select(DealLedger.underlying).where(DealLedger.subaccount_id.in_(subs))
-        ) if u})
+        # build 6: one list for the Underlying selector and the Settings asset list — underlyings
+        # with at least one non-zero position in the accounts (app.web.accounts)
+        underlyings = account_underlyings(s, subs)
         strategies = [
             {"id": sid, "name": name, "color": color}
             for sid, name, color in s.execute(
@@ -118,14 +116,8 @@ def filters(user: CurrentUser = Depends(get_current_user)) -> dict:
             select(GoldPositionLeg.underlying, func.count())
             .where(GoldPositionLeg.subaccount_id.in_(subs), GoldPositionLeg.underlying.isnot(None))
             .group_by(GoldPositionLeg.underlying)).all())
-        # underlyings with index candles on the user's exchanges (graph ① can show their price even
-        # before there are positions in them)
-        cexes = select(Subaccount.cex_code).where(Subaccount.id.in_(subs))
-        priced = {u for (u,) in s.execute(
-            select(IndexCandle.inst_id).where(IndexCandle.cex_code.in_(cexes)).distinct())}
         # account names for the Account selectors — the same names as on the Box builder
         accounts = [{"id": a["id"], "label": a["label"]} for a in account_options(s, subs)]
-    underlyings = sorted(set(underlyings) | set(leg_counts) | priced)
     default_ul = (min(underlyings, key=lambda u: (-leg_counts.get(u, 0), u))
                   if underlyings else None)
     return {"underlyings": underlyings, "strategies": strategies, "assets": assets,

@@ -167,6 +167,14 @@ table.bb-rv td{white-space:nowrap}
 .bb-form label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:11px;letter-spacing:.5px;text-transform:uppercase}
 .bb-form input{width:100%}
 .bb-form input[type=color]{padding:2px;height:34px;width:70px;min-width:70px}
+/* Color + "Send notifications" on one row (core.strategy.send_notifications) */
+.bb-frow{display:flex;align-items:flex-end;gap:34px}
+.bb-form label.bb-notify{flex-direction:row;align-items:center;gap:9px;text-transform:none;letter-spacing:0;
+  font-size:13.5px;color:var(--text);cursor:pointer;height:34px}
+.bb-form label.bb-notify input{width:17px;height:17px;min-width:auto;margin:0;accent-color:var(--blue);cursor:pointer}
+.bb-notify span{display:flex;flex-direction:column;line-height:1.2}
+.bb-notify small{color:var(--muted);font-size:11px}
+.bb-col h3 .bb-bell-off{flex:none;margin-left:6px;font-size:12px;opacity:.85;cursor:help}
 .bb-dialog .err{margin:10px 0 0}
 .bb-danger{margin-top:12px;background:#24141a;border:1px solid #5b1e22;color:#f1c9c9;border-radius:9px;padding:9px 11px;font-size:12.5px;line-height:1.45}
 .bb-btn.danger.armed{background:#7a2a2a;border-color:#a33b3b;color:#fff}

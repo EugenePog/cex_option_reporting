@@ -187,3 +187,55 @@ def test_message_escapes_names():
     assert "<b>&lt;Iron&gt; &amp; co</b> · OKX_M_HEDGE · Hedge · BTC-USD" in msg
     assert "Box 60,000 – 68,000 · 2 legs, 2 open · last expiry 2026-09-25 08:00 UTC" in msg
     assert msg.endswith("2026-09-20 12:00 UTC · #top_strike")
+
+
+# --------------------------------------------------------------------------- Settings editor
+def test_code_info_matches_the_codes_the_table_allows():
+    from app.db.models_core import NOTIFICATION_CODES
+    from app.domain.alerts import CODE_INFO, CODE_LETTER
+
+    assert tuple(CODE_INFO) == NOTIFICATION_CODES
+    assert {c: i["letter"] for c, i in CODE_INFO.items()} == CODE_LETTER
+    assert {c: i["unit"] for c, i in CODE_INFO.items()} == {           # build 7: all six
+        "top_strike": "%", "bottom_strike": "%", "near_top_pct": "%", "near_bottom_pct": "%",
+        "last_expiry": "days", "last_expiry_days": "days"}
+    assert {c: i["default"] for c, i in CODE_INFO.items() if i["default"]} == THRESH  # c, d, f
+    assert {c for c, i in CODE_INFO.items() if i["critical"]} == CRIT        # a, b, e
+
+
+# ------------------------------------------------------------- build 7: a / b / e thresholds
+def test_critical_top_with_a_threshold_fires_before_the_strike():
+    # a at 0.5 % → 68,000 × 0.995 = 67,660 ; c at 2 % → 66,640
+    ev = run(box(), px(67700), top_strike=0.5)
+    assert codes(ev) == ["top_strike"]                         # c is covered by a
+    msg = ev.alerts[0].message
+    assert msg.startswith("🔴 <b>CRITICAL · BTC-USD within 0.5% of the top strike</b>")
+    assert "Price 67,700.0 ≥ 67,660 = top strike 68,000 − 0.5%" in msg
+    assert codes(run(box(), px(67000), top_strike=0.5)) == ["near_top_pct"]   # only c so far
+
+
+def test_critical_bottom_with_a_threshold():
+    ev = run(box(), px(60500), bottom_strike=1)                # 60,000 × 1.01 = 60,600
+    assert codes(ev) == ["bottom_strike"]
+    assert "Price 60,500.0 ≤ 60,600 = bottom strike 60,000 + 1%" in ev.alerts[0].message
+
+
+def test_critical_expiry_with_a_threshold_and_f_covered():
+    six_h = EXP - timedelta(hours=6)
+    ev = run(box(), px(64000), now=six_h, last_expiry=0.5)    # e due 12 h before, f 1 day before
+    assert codes(ev) == ["last_expiry"]                        # f covered by e once e is due
+    assert ev.alerts[0].message.startswith("🔴 <b>CRITICAL · Last expiry within 0.5 days</b>")
+    assert ev.updates[(2, 3, "BTC-USD", "last_expiry_days")].fired_for_ends_at == EXP
+    early = run(box(), px(64000), now=EXP - timedelta(hours=20), last_expiry=0.5)
+    assert codes(early) == ["last_expiry_days"]               # before e is due: f alone
+
+
+def test_time_code_caught_up_after_a_pause():
+    # e due 6 h before the expiry; worker back 3 h after the expiry: due + grace (12 h) not passed
+    late = EXP + timedelta(hours=3)
+    ev = run(box(), px(64000), now=late, last_expiry=0.25)
+    assert codes(ev) == ["last_expiry"]
+    assert "Last expiry reached" in ev.alerts[0].message and "expired" in ev.alerts[0].message
+    assert codes(run(box(), px(64000), now=EXP + timedelta(hours=7), last_expiry=0.25)) == []
+    # f (1 day before) is never sent after the expiry: due + 12 h < expiry
+    assert codes(run(box(), px(64000), now=late, last_expiry=0.25, off=("last_expiry",))) == []

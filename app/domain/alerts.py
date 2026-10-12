@@ -1,14 +1,17 @@
 """Telegram alerts for the boxes of graph ① "Price with strategy boxes". Pure, no I/O.
 
 Notification codes — core.notification_setting, one row per asset × code (the same settings for
-every account and box of that asset):
+every account and box of that asset). Every code has a threshold (build 7), so the critical tier
+(a, b, e) and the early tier (c, d, f) can each be made as strict as wanted:
 
-    a  top_strike        price ≥ the box's top strike
-    b  bottom_strike     price ≤ the box's bottom strike
-    c  near_top_pct      price ≥ top strike − X %             X = threshold
-    d  near_bottom_pct   price ≤ bottom strike + Y %          Y = threshold
-    e  last_expiry       time reaches the box's last expiry
-    f  last_expiry_days  time reaches the last expiry − N days     N = threshold
+    a  top_strike        top reached     price ≥ top strike − X %          X = threshold (default 0)
+    b  bottom_strike     bottom reached  price ≤ bottom strike + Y %       Y = threshold (default 0)
+    c  near_top_pct      top near        price ≥ top strike − X %          X = threshold (default 2)
+    d  near_bottom_pct   bottom near     price ≤ bottom strike + Y %       Y = threshold (default 2)
+    e  last_expiry       expiry reached  time ≥ last expiry − N days       N = threshold (default 0)
+    f  last_expiry_days  expiry near     time ≥ last expiry − N days       N = threshold (default 1)
+
+With threshold 0, a / b fire at the strike itself and e at the expiry moment.
 
 The box is the one graph ① draws (gold.box_shape: all legs of one strategy on one underlying): top /
 bottom = its highest / lowest strike, last expiry = its right edge. Only ALIVE boxes are watched —
@@ -20,11 +23,13 @@ Each notification goes out once per crossing:
     the same notification then waits at least `rearm` after the previous one (no ping-pong around
     a strike). When a box stops being alive, its price codes are re-armed.
   * time codes (e, f) are sent once per last-expiry value — a box that rolls on to a later expiry
-    gets them again. e is sent from the expiry moment for `grace`, only for a box that was still
-    alive right before its last expiry (not when every leg was closed early); f while the box is
-    alive within the N days before its last expiry.
-  * When a and c are both true (price at or above the top), only a is sent and c is marked done;
-    the same for b over d — unless a / b is switched off.
+    gets them again. A time code is due from `last expiry − N days` while the box is alive; a check
+    that comes late (worker paused) still sends it until max(last expiry, due time + `grace`),
+    provided the box was alive right before its last expiry (not when every leg was closed early).
+    With N = 0 that is: from the expiry moment, for `grace`.
+  * The critical tier covers the early tier of the same side: when a and c are both true, only a is
+    sent and c is marked done; the same for b over d, and for e over f once e is due — unless the
+    critical code is switched off.
 """
 from __future__ import annotations
 
@@ -38,9 +43,30 @@ CODE_LETTER = {"top_strike": "a", "bottom_strike": "b", "near_top_pct": "c",
                "near_bottom_pct": "d", "last_expiry": "e", "last_expiry_days": "f"}
 PRICE_CODES = ("top_strike", "bottom_strike", "near_top_pct", "near_bottom_pct")
 TIME_CODES = ("last_expiry", "last_expiry_days")
-SUPPRESSED_BY = {"near_top_pct": "top_strike", "near_bottom_pct": "bottom_strike"}
+TOP_CODES = ("top_strike", "near_top_pct")          # level = top strike − X %, hit when price ≥
+BOTTOM_CODES = ("bottom_strike", "near_bottom_pct")  # level = bottom strike + Y %, hit when price ≤
+SUPPRESSED_BY = {"near_top_pct": "top_strike", "near_bottom_pct": "bottom_strike",
+                 "last_expiry_days": "last_expiry"}
 
 CRITICAL_MARK, NORMAL_MARK = "🔴", "🟡"
+
+# Settings → Telegram notifications (build 6; build 7: every code has a threshold): how each code is
+# offered, the threshold's unit, and the defaults for a new row (critical flag, threshold).
+CODE_INFO: dict[str, dict] = {
+    "top_strike": {"letter": "a", "label": "price ≥ top strike − X %",
+                   "unit": "%", "critical": True, "default": 0},
+    "bottom_strike": {"letter": "b", "label": "price ≤ bottom strike + Y %",
+                      "unit": "%", "critical": True, "default": 0},
+    "near_top_pct": {"letter": "c", "label": "price ≥ top strike − X %",
+                     "unit": "%", "critical": False, "default": 2},
+    "near_bottom_pct": {"letter": "d", "label": "price ≤ bottom strike + Y %",
+                        "unit": "%", "critical": False, "default": 2},
+    "last_expiry": {"letter": "e", "label": "time ≥ last expiry − N days",
+                    "unit": "days", "critical": True, "default": 0},
+    "last_expiry_days": {"letter": "f", "label": "time ≥ last expiry − N days",
+                         "unit": "days", "critical": False, "default": 1},
+}
+THRESHOLD_MIN, THRESHOLD_MAX = 0, 100
 
 
 @dataclass(frozen=True)
@@ -131,20 +157,30 @@ def is_alive(box: AlertBox, now: datetime) -> bool:
 
 
 def price_level(code: str, threshold: float, box: AlertBox) -> float:
-    """The price the code compares with."""
-    if code == "top_strike":
-        return box.strike_hi
-    if code == "bottom_strike":
-        return box.strike_lo
-    if code == "near_top_pct":
+    """The price the code compares with: top strike − X % (a, c) or bottom strike + Y % (b, d)."""
+    if code in TOP_CODES:
         return box.strike_hi * (1 - threshold / 100)
-    if code == "near_bottom_pct":
+    if code in BOTTOM_CODES:
         return box.strike_lo * (1 + threshold / 100)
     raise ValueError(f"not a price code: {code}")
 
 
 def price_hit(code: str, price: float, level: float) -> bool:
-    return price >= level if code in ("top_strike", "near_top_pct") else price <= level
+    return price >= level if code in TOP_CODES else price <= level
+
+
+def time_due(box: AlertBox, threshold: float) -> datetime:
+    """When a time code (e, f) is due: last expiry − N days."""
+    return box.ends_at - timedelta(days=threshold)
+
+
+def time_hit(box: AlertBox, threshold: float, now: datetime, grace: timedelta) -> bool:
+    """Due and not too late — until max(last expiry, due + grace) — and the box alive now, or (after
+    the expiry) right before its last expiry."""
+    due = time_due(box, threshold)
+    if not due <= now < max(box.ends_at, due + grace):
+        return False
+    return open_legs(box, min(now, box.ends_at - timedelta(seconds=1))) > 0
 
 
 # --------------------------------------------------------------------------- #
@@ -205,12 +241,11 @@ def evaluate(boxes: list[AlertBox], settings: dict[tuple[str, str], Setting],
             state = states.get(key, State())
             if state.fired_for_ends_at == box.ends_at:
                 continue
-            if code == "last_expiry":
-                hit = (box.ends_at <= now < box.ends_at + grace
-                       and open_legs(box, box.ends_at - timedelta(seconds=1)) > 0)
-            else:
-                hit = alive and box.ends_at - timedelta(days=st.threshold) <= now < box.ends_at
-            if not hit:
+            if not time_hit(box, st.threshold, now, grace):
+                continue
+            sup = own.get(SUPPRESSED_BY.get(code, ""))
+            if sup is not None and sup.enabled and now >= time_due(box, sup.threshold):
+                ev.updates[key] = replace(state, fired_for_ends_at=box.ends_at)   # e covers it
                 continue
             msg = format_message(box, st, now)
             ev.alerts.append(Alert(box, st, msg, replace(
@@ -250,16 +285,17 @@ def fmt_span(d: timedelta) -> str:
     return f"{mins} min"
 
 
-def title(setting: Setting) -> str:
-    a, x = setting.asset, fmt_num(setting.threshold)
-    return {
-        "top_strike": f"{a} reached the top strike",
-        "bottom_strike": f"{a} reached the bottom strike",
-        "near_top_pct": f"{a} within {x}% of the top strike",
-        "near_bottom_pct": f"{a} within {x}% of the bottom strike",
-        "last_expiry": "Last expiry reached",
-        "last_expiry_days": f"Last expiry within {x} day{'' if setting.threshold == 1 else 's'}",
-    }[setting.code]
+def title(setting: Setting, expired: bool = False) -> str:
+    """Header text; the threshold decides the wording (0 = "reached")."""
+    a, x, t = setting.asset, fmt_num(setting.threshold), setting.threshold
+    if setting.code in TOP_CODES:
+        return f"{a} reached the top strike" if t == 0 else f"{a} within {x}% of the top strike"
+    if setting.code in BOTTOM_CODES:
+        return (f"{a} reached the bottom strike" if t == 0
+                else f"{a} within {x}% of the bottom strike")
+    if t == 0 or expired:
+        return "Last expiry reached"
+    return f"Last expiry within {x} day{'' if t == 1 else 's'}"
 
 
 def esc(v: str) -> str:
@@ -271,21 +307,23 @@ def format_message(box: AlertBox, setting: Setting, now: datetime, price: Price 
                    level: float | None = None) -> str:
     """Critical: 🔴 + bold "CRITICAL · …" header; otherwise 🟡 + bold header (Telegram can't color
     text). Then the box, the detail line, the box summary, the time and a #code hashtag."""
-    head = f"CRITICAL · {title(setting)}" if setting.critical else title(setting)
+    expired = now >= box.ends_at
+    head = title(setting, expired)
+    head = f"CRITICAL · {head}" if setting.critical else head
     mark = CRITICAL_MARK if setting.critical else NORMAL_MARK
-    code, x = setting.code, fmt_num(setting.threshold)
+    code, x, t = setting.code, fmt_num(setting.threshold), setting.threshold
     if price is not None and level is not None:
         px = fmt_price(price.value)
         src = "" if price.source == "index" else f" (last candle {fmt_utc(price.at)[11:]})"
-        detail = {
-            "top_strike": f"Price {px} ≥ top strike {fmt_strike(level)}",
-            "bottom_strike": f"Price {px} ≤ bottom strike {fmt_strike(level)}",
-            "near_top_pct": f"Price {px} ≥ {fmt_strike(round(level, 2))} = top strike "
-                            f"{fmt_strike(box.strike_hi)} − {x}%",
-            "near_bottom_pct": f"Price {px} ≤ {fmt_strike(round(level, 2))} = bottom strike "
-                               f"{fmt_strike(box.strike_lo)} + {x}%",
-        }[code] + src
-    elif code == "last_expiry":
+        top = code in TOP_CODES
+        side, op, k = ("top", "≥", box.strike_hi) if top else ("bottom", "≤", box.strike_lo)
+        if t == 0:
+            detail = f"Price {px} {op} {side} strike {fmt_strike(k)}"
+        else:
+            detail = (f"Price {px} {op} {fmt_strike(round(level, 2))} = {side} strike "
+                      f"{fmt_strike(k)} {'−' if top else '+'} {x}%")
+        detail += src
+    elif expired:
         detail = f"Last expiry {fmt_utc(box.ends_at)} — the box's last options expired"
     else:
         detail = f"Last expiry {fmt_utc(box.ends_at)} — in {fmt_span(box.ends_at - now)}"

@@ -80,6 +80,8 @@ class Subaccount(Base):
 class Strategy(Base):
     """A strategy — shown as a *box* in the admin Box builder.
 
+    `send_notifications` (0023) switches the box's Telegram alerts on / off.
+
     Deleting a box is a soft delete (`deleted_at`, 0018): its legs are pinned to the account's
     `unassigned` box in changeset `deleted_changeset_id`, its strategy_rule rows stop applying, and
     it disappears from the GUI; the row stays so silver/gold/pin history keep valid FKs and Undo of
@@ -105,6 +107,11 @@ class Strategy(Base):
     deleted_by: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("core.user.id", name="fk_strategy_deleted_by_user"), nullable=True)
     deleted_changeset_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
+    # Telegram alerts (0023): the alerts worker watches this box only while true. Switched in the
+    # Box builder's New box / ✎ edit dialog; off = nothing sent and no core.notification_state rows
+    # written (existing rows are kept and used again when it is switched back on).
+    send_notifications: Mapped[bool] = mapped_column(Boolean, default=True,
+                                                     server_default=text("true"))
 
 
 class StrategyRule(Base):
@@ -211,18 +218,20 @@ class ContractSize(Base):
 
 # Telegram notification codes for the boxes of graph ① "Price with strategy boxes" (0022).
 # a–d compare the live index price with the box strikes, e–f the time with the box's last expiry.
+# Build 7: every code uses its threshold — a, b, e are the critical tier, c, d, f the early tier.
 NOTIFICATION_CODES: tuple[str, ...] = (
-    "top_strike",        # a  price ≥ top strike                         (threshold unused: 0)
-    "bottom_strike",     # b  price ≤ bottom strike                      (threshold unused: 0)
-    "near_top_pct",      # c  price ≥ top strike − X %                   (threshold = X, percent)
-    "near_bottom_pct",   # d  price ≤ bottom strike + Y %                (threshold = Y, percent)
-    "last_expiry",       # e  time reaches the box's last expiry         (threshold unused: 0)
-    "last_expiry_days",  # f  time reaches the last expiry − N days      (threshold = N, days)
+    "top_strike",        # a  price ≥ top strike − X %      X = threshold, % (0 = at the strike)
+    "bottom_strike",     # b  price ≤ bottom strike + Y %   Y = threshold, % (0 = at the strike)
+    "near_top_pct",      # c  price ≥ top strike − X %      X = threshold, %
+    "near_bottom_pct",   # d  price ≤ bottom strike + Y %   Y = threshold, %
+    "last_expiry",       # e  time ≥ last expiry − N days   N = threshold, days (0 = at expiry)
+    "last_expiry_days",  # f  time ≥ last expiry − N days   N = threshold, days
 )
 
 
 class NotificationSetting(Base):
-    """Telegram notification settings — seeded / edited by hand. Added in 0022.
+    """Telegram notification settings — seeded, and edited in the admin Settings tab
+    (/api/admin/settings/notifications, build 6). Added in 0022.
 
     One row per asset × notification code: every account and box (strategy) of that asset shares
     the same settings. `asset` is the option underlying / index, e.g. 'BTC-USD'. Read by the alerts

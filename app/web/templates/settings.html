@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Settings · CEX Option Reporting{% endblock %}
+{% block nav_settings %}active{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/settings.css?v={{ asset_ver }}">{% endblock %}
+{% block body %}
+<h1 class="page">Settings</h1>
+<p class="sub">Portal-wide settings (admin only). Changes are saved to the database and apply right away.</p>
+
+<div class="st-layout">
+  <!-- left: the list of settings — each item opens its editor on the right -->
+  <nav class="card st-nav" id="st-nav" aria-label="Settings">
+    <button type="button" class="st-item on" data-panel="telegram">
+      <span class="st-ico" aria-hidden="true">✈︎</span>
+      <span><b>Telegram notifications</b></span>
+    </button>
+  </nav>
+
+  <!-- right: the selected setting -->
+  <section class="card st-main" id="panel-telegram">
+    <div class="st-ph">
+      <h2>Telegram notifications</h2>
+      <span class="spacer"></span>
+      <button type="button" class="st-btn primary" id="tg-add">+ Add notification</button>
+    </div>
+
+    <div class="st-tablewrap">
+      <table class="st-table" id="tg-table">
+        <thead><tr>
+          <th>Asset</th>
+          <th>Notification</th>
+          <th title="a–d: X / Y percent from the strike towards the inside of the box · e / f: N days before the last expiry · 0 = at the strike / expiry">Threshold</th>
+          <th title="On / off">On</th>
+          <th title="Critical messages start with 🔴 CRITICAL (Telegram can't color text); others with 🟡">Critical</th>
+          <th>Note</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="tg-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <!-- code → meaning, one code per row (the Notification column shows the bare code) -->
+    <div class="st-foot">
+      <b>Codes</b>
+      <table class="st-codes" id="tg-codes"></table>
+    </div>
+  </section>
+</div>
+
+<div class="st-toast" id="st-toast" hidden></div>
+<script src="/static/settings.js?v={{ asset_ver }}"></script>
+{% endblock %}

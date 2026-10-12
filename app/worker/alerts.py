@@ -3,9 +3,10 @@
 pm2 process `worker` (`python -m app.cli worker --loop`). One check (`run_once`):
 
   1. read core.notification_setting — what to watch per asset (nothing on → nothing to do);
-  2. read the boxes of those assets from gold.box_shape (not `unassigned`, strategy not deleted;
-     still open, or past their last expiry by less than ALERTS_EXPIRY_GRACE_HOURS) and their legs
-     from gold.position_leg;
+  2. read the boxes of those assets from gold.box_shape (not `unassigned`, strategy not deleted,
+     strategy `send_notifications` on — a box switched off is skipped entirely: no message, no
+     state row, its existing rows kept; still open, or past their last expiry by less than
+     ALERTS_EXPIRY_GRACE_HOURS) and their legs from gold.position_leg;
   3. get the current index price per exchange × asset: the OKX public index ticker; if that fails,
      the newest stored 1-minute candle (silver.index_candle) when it is at most
      ALERTS_MAX_PRICE_AGE_MINUTES old; otherwise the price alerts wait for the next check;
@@ -86,7 +87,7 @@ def load_boxes(s, assets: set[str], now: datetime, grace: timedelta) -> list[Ale
         .join(Strategy, Strategy.id == BoxShape.strategy_id)
         .join(Subaccount, Subaccount.id == BoxShape.subaccount_id)
         .where(BoxShape.underlying.in_(assets), Strategy.deleted_at.is_(None),
-               Strategy.name != "unassigned",
+               Strategy.name != "unassigned", Strategy.send_notifications.is_(True),
                or_(BoxShape.status == "open", BoxShape.ends_at >= now - grace))
         .order_by(BoxShape.subaccount_id, BoxShape.strategy_id)
     ).all()

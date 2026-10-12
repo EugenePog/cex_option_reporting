@@ -271,9 +271,9 @@ function renderCols() {
     const rules = st.rules.length ? `rule${st.rules.length > 1 ? "s" : ""} ${st.rules.map(r => "#" + r.id + " " + esc(Object.values(r.match || {}).join(" "))).join(", ")}`
       : st.is_unassigned ? "no rule matched" : "manual only";
     const limit = S.showAll.has(st.id) ? 1e9 : 6;
-    const edit = st.is_unassigned ? "" : `<button type="button" class="bb-edit" data-edit="${st.id}" title="Rename, recolor or delete this box" aria-label="Edit box ${esc(st.name)}"><svg viewBox="0 0 16 16" width="13" height="13"><path d="M11.3 1.7a1.6 1.6 0 0 1 2.3 0l.7.7a1.6 1.6 0 0 1 0 2.3L5.6 13.4 2 14l.6-3.6z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M10 3l3 3" stroke="currentColor" stroke-width="1.4"/></svg></button>`;
+    const edit = st.is_unassigned ? "" : `<button type="button" class="bb-edit" data-edit="${st.id}" title="Rename, recolor, switch alerts or delete this box" aria-label="Edit box ${esc(st.name)}"><svg viewBox="0 0 16 16" width="13" height="13"><path d="M11.3 1.7a1.6 1.6 0 0 1 2.3 0l.7.7a1.6 1.6 0 0 1 0 2.3L5.6 13.4 2 14l.6-3.6z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M10 3l3 3" stroke="currentColor" stroke-width="1.4"/></svg></button>`;
     h += `<div class="bb-col" data-drop="${st.id}">
-      <h3><i class="dot" style="background:${esc(st.color)}"></i><span class="bn" title="${esc(st.description || st.name)}">${esc(st.name)}</span>${edit}</h3>
+      <h3><i class="dot" style="background:${esc(st.color)}"></i><span class="bn" title="${esc(st.description || st.name)}">${esc(st.name)}</span>${!st.is_unassigned && st.send_notifications === false ? `<span class="bb-bell-off" title="Telegram notifications are off for this box (✎ to switch them on)" aria-label="notifications off">🔕</span>` : ""}${edit}</h3>
       <div class="meta">${k.n} legs · ${rules}</div>
       <div class="kp"><div>NET P&amp;L<b class="${pnlCls(k.pnl)}">${moneyK(k.pnl)}</b></div>
         <div>WIN<b>${st.win_rate == null ? "—" : Math.round(st.win_rate * 100) + "%"}</b></div><div>OPEN<b>${k.open}</b></div></div>
@@ -521,6 +521,7 @@ function openStratDlg(st) {
   $("ns-name").value = st ? st.name : "";
   $("ns-color").value = st && /^#[0-9a-f]{6}$/i.test(st.color || "") ? st.color : "#9b7be0";
   $("ns-desc").value = st ? (st.description || "") : "";
+  $("ns-notify").checked = st ? st.send_notifications !== false : true;
   $("ns-save").textContent = st ? "Save" : "Create";
   $("ns-save").disabled = false;
   const del = $("ns-delete");
@@ -529,7 +530,8 @@ function openStratDlg(st) {
   openDlg("dlg-strat"); setTimeout(() => $("ns-name").focus(), 30);
 }
 async function saveStrategy() {
-  const body = {name: $("ns-name").value, color: $("ns-color").value, description: $("ns-desc").value};
+  const body = {name: $("ns-name").value, color: $("ns-color").value, description: $("ns-desc").value,
+                send_notifications: $("ns-notify").checked};
   $("ns-save").disabled = true;
   try {
     if (NS.id) {

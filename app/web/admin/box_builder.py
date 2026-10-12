@@ -7,7 +7,7 @@ writes an append-only row to core.strategy_link (action='pin'), which the bronze
 applies with precedence over every strategy_rule; 'Reset to rule' writes action='unpin'. Each
 Apply / Reset / Undo is one changeset (uuid) and is also summarized in core.audit_log.
 
-Boxes can be created, edited (name / color / description) and deleted. Delete is a soft delete
+Boxes can be created, edited (name / color / description / send notifications) and deleted. Delete is a soft delete
 (core.strategy.deleted_at, 0018): every leg in the box is pinned to the account's `unassigned`
 box as one changeset, the box's rules stop applying, and Undo of that changeset restores the box.
 
@@ -239,6 +239,7 @@ def _strategy_rows(s, sub_id: int, legs: list[dict]) -> list[dict]:
     for st in _strategies(s, sub_id):
         out.append({"id": st.id, "name": st.name, "color": st.color or "#888888",
                     "description": st.description, "is_unassigned": st.name == "unassigned",
+                    "send_notifications": bool(st.send_notifications),
                     "rules": rules.get(st.id, []), **stats.get(st.id, empty)})
     # unassigned last, others by id
     out.sort(key=lambda r: (r["is_unassigned"], r["id"]))
@@ -445,12 +446,14 @@ class StrategyIn(BaseModel):
     name: str
     color: str | None = None
     description: str | None = None
+    send_notifications: bool = True        # Telegram alerts for this box (0023)
 
 
 class StrategyEditIn(BaseModel):
     name: str
     color: str | None = None
     description: str | None = None
+    send_notifications: bool | None = None  # None = unchanged
 
 
 def _valid_name(raw: str | None) -> str:
@@ -678,19 +681,22 @@ def create_strategy(body: StrategyIn, user: CurrentUser = Depends(require_admin)
         if _name_taken(s, body.subaccount_id, name):
             raise HTTPException(409, f"Box '{name}' already exists in this account")
         st = Strategy(subaccount_id=body.subaccount_id, name=name, color=color,
-                      description=(body.description or "").strip() or None)
+                      description=(body.description or "").strip() or None,
+                      send_notifications=body.send_notifications)
         s.add(st)
         s.flush()
         _audit(s, user.id, "box_builder.create_strategy",
-               f"strategy={st.id} subaccount={body.subaccount_id} name={name}")
-        return {"id": st.id, "name": st.name, "color": st.color}
+               f"strategy={st.id} subaccount={body.subaccount_id} name={name} "
+               f"notify={'on' if st.send_notifications else 'off'}")
+        return {"id": st.id, "name": st.name, "color": st.color,
+                "send_notifications": st.send_notifications}
 
 
 @router.put("/strategies/{strategy_id}")
 def update_strategy(strategy_id: int, body: StrategyEditIn,
                     user: CurrentUser = Depends(require_admin)) -> dict:
-    """Edit a box: name, color, description. Legs, pins and rules are untouched; reports read the
-    name live from core.strategy, so no recompute is needed."""
+    """Edit a box: name, color, description, send notifications. Legs, pins and rules are
+    untouched; reports and the alerts worker read core.strategy live, so no recompute is needed."""
     with SessionLocal() as s, s.begin():
         st = _active_box(s, user, strategy_id)
         if st.name == UNASSIGNED:
@@ -703,9 +709,14 @@ def update_strategy(strategy_id: int, body: StrategyEditIn,
         if body.color and _HEX.match(body.color):
             st.color = body.color
         st.description = (body.description or "").strip() or None
+        notify = ""
+        if body.send_notifications is not None and body.send_notifications != st.send_notifications:
+            st.send_notifications = body.send_notifications
+            notify = f" notify={'on' if st.send_notifications else 'off'}"
         _audit(s, user.id, "box_builder.update_strategy",
-               f"strategy={st.id} subaccount={st.subaccount_id} name={old}->{name}")
-        return {"id": st.id, "name": st.name, "color": st.color, "description": st.description}
+               f"strategy={st.id} subaccount={st.subaccount_id} name={old}->{name}{notify}")
+        return {"id": st.id, "name": st.name, "color": st.color, "description": st.description,
+                "send_notifications": st.send_notifications}
 
 
 @router.delete("/strategies/{strategy_id}")

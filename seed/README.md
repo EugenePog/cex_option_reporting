@@ -80,6 +80,7 @@ python -m app.cli seed --replace         # truncate the seed tables first, then 
 | column | allowed values |
 |---|---|
 | `color` | hex color for the UI, e.g. `#4c9aff` |
+| `send_notifications` | optional (migration 0023): `true` / `false` — Telegram alerts for this box. Leave the column out to keep what the Box builder's ✎ dialog set; if the column is there, `make seed` writes it back. New boxes default to `true`. |
 
 **`contract_size`** — contract size per exchange (migration 0020; replaces the old hardcoded values)
 
@@ -105,16 +106,21 @@ DB takes effect within a minute — no restart. An asset without rows gets no al
 | column | allowed values |
 |---|---|
 | `asset` | the option underlying / index, e.g. `BTC-USD` (same as `underlying` elsewhere) |
-| `code` | `top_strike` (a: price ≥ top strike of the box), `bottom_strike` (b: price ≤ bottom strike), `near_top_pct` (c: price ≥ top − X %), `near_bottom_pct` (d: price ≤ bottom + Y %), `last_expiry` (e: the box's last expiry reached), `last_expiry_days` (f: N days before the last expiry) |
-| `threshold` | X / Y in **percent** for c / d (e.g. `2` = 2 %), N in **days** for f (may be fractional, `0.5` = 12 h); `0` for a, b, e |
+| `code` | `top_strike` (a, critical tier: price ≥ top strike − X %), `bottom_strike` (b, critical: price ≤ bottom strike + Y %), `near_top_pct` (c, early tier: price ≥ top − X %), `near_bottom_pct` (d, early: price ≤ bottom + Y %), `last_expiry` (e, critical: time ≥ last expiry − N days), `last_expiry_days` (f, early: time ≥ last expiry − N days) |
+| `threshold` | 0–100, used by **every** code (build 7): X / Y in **percent** for a–d (e.g. `2` = 2 % from the strike towards the inside of the box; `0` = at the strike), N in **days** for e / f (may be fractional, `0.5` = 12 h; `0` = at the expiry). Defaults: a, b, e `0`; c, d `2`; f `1` |
 | `is_enabled` | `true` / `false` — on / off |
 | `is_critical` | `true` / `false` — critical messages start with 🔴 **CRITICAL** (Telegram has no red text), others with 🟡; default true for a, b, e |
 | `note` | free text |
 
 The migration already inserts the six BTC-USD rows (ids 1–6: all on; a, b, e critical; X = Y = 2;
 N = 1), so seeding this file is only needed to change them or add assets (e.g. ids 7–12 for
-`ETH-USD`). A change made directly in the DB (Adminer / psql) is overwritten by the next `make seed`
-if this file still has the old values — change it here too.
+`ETH-USD`). A change made in the DB — in the admin **Settings → Telegram notifications** editor,
+Adminer or psql — is overwritten by the next `make seed` if this file still has the old values —
+change it here too.
+
+Unlike the other tables, rows are **matched on `asset` + `code`**, not on `id` (the Settings editor
+adds and deletes rows, so ids drift): a CSV row updates the DB row with the same asset and code, or
+is added with the next free id. The CSV `id` is ignored. Rows that are only in the DB stay.
 
 **`strategy_rule`**
 

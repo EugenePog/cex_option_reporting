@@ -53,3 +53,17 @@ def test_box_edit_and_delete_require_auth():
 def test_price_boxes_requires_auth():
     r = client.get("/api/price-boxes")
     assert r.status_code == 401
+
+
+def test_settings_redirects_when_anonymous():
+    r = client.get("/settings", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/login"
+
+
+def test_settings_api_requires_auth():
+    base = "/api/admin/settings/notifications"
+    assert client.get(base).status_code == 401
+    body = {"asset": "BTC-USD", "code": "top_strike"}
+    assert client.post(base, json=body).status_code == 401
+    assert client.put(base + "/1", json=body).status_code == 401
+    assert client.delete(base + "/1").status_code == 401

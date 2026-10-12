@@ -124,7 +124,13 @@
     <div class="sub" id="ns-sub"></div>
     <div class="bb-form">
       <label>Name<input id="ns-name" maxlength="64" placeholder="e.g. weekend-straddle"></label>
-      <label>Color<input id="ns-color" type="color" value="#9b7be0"></label>
+      <div class="bb-frow">
+        <label>Color<input id="ns-color" type="color" value="#9b7be0"></label>
+        <!-- Telegram alerts for this box (core.strategy.send_notifications, 0023) -->
+        <label class="bb-notify" title="Telegram alerts for this box — what is sent is set in Settings → Telegram notifications">
+          <input type="checkbox" id="ns-notify" checked>
+          <span>Send notifications<small>Telegram alerts for this box</small></span></label>
+      </div>
       <label>Description<input id="ns-desc" placeholder="optional"></label>
     </div>
     <div class="bb-danger" id="ns-del-confirm" hidden></div>

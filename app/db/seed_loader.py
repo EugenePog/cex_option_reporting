@@ -2,6 +2,7 @@
 
 Each CSV under the seed folder is upserted by primary key `id` into its `core` table, in
 dependency order, then the id sequence is reset. Re-running updates rather than duplicating.
+Exception (build 6): `notification_setting` is matched on (asset, code) — see NATURAL_KEYS.
 
 Only the manually-managed settings tables are handled here:
     user -> cex_account -> subaccount -> strategy -> strategy_rule, contract_size
@@ -53,6 +54,11 @@ SEED_TABLES: list[tuple[str, type]] = [
     ("notification_setting", NotificationSetting),
 ]
 _MODEL_BY_NAME = {name: model for name, model in SEED_TABLES}
+
+# Tables matched on a natural key instead of `id` (build 6): the Settings tab adds / deletes these
+# rows, so their ids drift from the CSV — a row is the same row when its key matches. The CSV `id`
+# is then ignored (new rows get the next id).
+NATURAL_KEYS: dict[str, tuple[str, ...]] = {"notification_setting": ("asset", "code")}
 
 
 def coerce_value(col_type: Any, raw: str) -> Any:
@@ -144,9 +150,21 @@ def load_seed(folder: str = "seed", only: str | None = None, replace: bool = Fal
                 rows = list(csv.DictReader(fh))
 
             loaded = 0
+            natural = NATURAL_KEYS.get(name)
+            if natural:
+                _reset_sequence(s, model, prep.format_table(model.__table__))
             for row in rows:
                 values = _coerce_row(model, row)
                 if not values:
+                    continue
+                if natural and all(values.get(k) not in (None, "") for k in natural):
+                    values.pop("id", None)
+                    stmt = pg_insert(model).values(**values)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=list(natural),
+                        set_={c: stmt.excluded[c] for c in values if c not in natural})
+                    s.execute(stmt)
+                    loaded += 1
                     continue
                 stmt = pg_insert(model).values(**values)
                 update_cols = {c: stmt.excluded[c] for c in values if c != "id"}

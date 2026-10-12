@@ -261,7 +261,8 @@ docker exec -it cex_pg psql -U cex -d cex_option_reporting \
 
 The `worker` process sends a Telegram message when a box on graph ① "Price with strategy boxes"
 (a) reaches its top strike, (b) its bottom strike, (c) gets within X % of the top, (d) within Y % of
-the bottom, (e) reaches its last expiry, or (f) is N days before it. Only boxes with at least one
+the bottom, (e) reaches its last expiry, or (f) is N days before it. (Build 7: a, b, e take a
+threshold too — e.g. a at 0.5 % fires 0.5 % below the top strike; e at 0.25 fires 6 h before.) Only boxes with at least one
 open leg are watched; each message goes out once per crossing. Critical ones (a, b, e by default)
 start with 🔴 **CRITICAL** (Telegram can't color text), the others with 🟡.
 
@@ -303,6 +304,22 @@ docker exec -it cex_pg psql -U cex -d cex_option_reporting \
 
 Keep `seed/notification_setting.csv` in step if you change values in the DB — `make seed` writes the
 CSV values back.
+
+### 10g. Per-box switch + Settings tab (migration 0023)
+
+```bash
+make migrate                      # 0023: core.strategy.send_notifications (default true — nothing changes)
+pm2 restart web worker            # new Settings tab; worker skips boxes switched off
+```
+
+- **Per box:** Box builder → ✎ on a box (or **+ New box**) → **Send notifications** next to Color.
+  Off = the worker ignores the box (no message, no state written; earlier state is kept). A box that is
+  off shows 🔕 next to its name.
+- **What to send:** the admin **Settings** tab → **Telegram notifications** — add, edit and delete
+  rows (asset, notification a–f, threshold 0–100 for every code: % from the strike for a–d, days
+  before the last expiry for e/f — 🆕 build 7: a, b, e use it too, so the critical tier can fire
+  before the strike / expiry; on/off; critical; note). One row per asset + notification; the asset list is the same as the Dashboard's
+  Underlying list (underlyings with positions in the accounts).
 
 ---
 

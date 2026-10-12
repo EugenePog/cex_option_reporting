@@ -253,9 +253,10 @@ def worker(
 ) -> None:
     """Telegram alerts for the boxes of Dashboard graph ① "Price with strategy boxes".
 
-    What to watch is in core.notification_setting (per asset: top / bottom strike reached, within
-    X % / Y % of them, last expiry reached, N days before it — each on/off, critical or not). Only
-    boxes with at least one open leg are watched. Telegram: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
+    What to watch is in core.notification_setting, edited in the admin Settings tab (per asset:
+    top / bottom strike reached or near — X / Y % from the strike — and last expiry reached or near —
+    N days before it; each with its own threshold, on/off, critical or not). Only boxes with at
+    least one open leg and alerts switched on are watched. Telegram: TELEGRAM_BOT_TOKEN / _CHAT_ID.
     """
     setup_logging()
     from app.worker import alerts, notifier

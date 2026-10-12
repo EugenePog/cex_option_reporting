@@ -1,0 +1,65 @@
+/* Settings tab (admin): left list of settings + the selected editor. */
+.st-layout{display:grid;grid-template-columns:250px 1fr;gap:18px;align-items:start}
+@media(max-width:900px){.st-layout{grid-template-columns:1fr}}
+
+/* left list */
+.st-nav{padding:8px;display:flex;flex-direction:column;gap:4px;position:sticky;top:70px}
+.st-item{display:flex;gap:10px;align-items:center;text-align:left;width:100%;background:transparent;border:1px solid transparent;
+  border-radius:9px;padding:9px 10px;color:var(--text);cursor:pointer;font:inherit}
+.st-item:hover{background:var(--panel2)}
+.st-item.on{background:#16233a;border-color:#2e4f75}
+.st-item b{display:block;font-size:13.5px}
+.st-ico{flex:none;width:28px;height:28px;border-radius:8px;background:#1d2c44;color:#9cc3ff;display:inline-flex;
+  align-items:center;justify-content:center;font-size:14px}
+
+/* editor */
+.st-ph{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.st-ph h2{font-size:16px;margin:0}
+.st-ph .spacer{flex:1}
+.st-btn{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;
+  font-weight:700;font-size:12.5px;cursor:pointer;white-space:nowrap}
+.st-btn:disabled{opacity:.4;cursor:default}
+.st-btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+.st-btn.ghost{background:transparent}
+.st-btn.danger{border-color:#7a2a2a;color:#f7a6a6}
+.st-btn.danger.armed{background:#7a2a2a;border-color:#a33b3b;color:#fff}
+
+.st-tablewrap{overflow-x:auto}
+.st-table{font-size:13px}
+.st-table th,.st-table td{text-align:left;padding:7px 8px;vertical-align:middle}
+.st-table tbody tr:hover{background:transparent;cursor:default}
+.st-table select,.st-table input[type=text],.st-table input[type=number]{min-width:0;padding:6px 8px;font-size:13px}
+.st-table select{width:100%}
+.st-table td:nth-child(1){width:128px}
+.st-table td:nth-child(1) select{min-width:116px}
+.st-table td:nth-child(2){width:210px;min-width:180px}
+.st-table td.thc{white-space:nowrap;width:130px}
+.st-table input.th{width:76px}
+.st-table .unit{margin-left:6px;color:var(--muted);font-size:12px}
+.st-table td.ck{text-align:center;width:64px;white-space:nowrap}
+.st-table th:nth-child(4),.st-table th:nth-child(5){text-align:center}
+.st-table td.ck input{width:16px;height:16px;min-width:auto;accent-color:var(--blue);vertical-align:middle;cursor:pointer}
+.st-table .crit{margin-left:4px;font-size:11px}
+.st-table input[type=text]{width:100%;min-width:140px}
+.st-table td.act{white-space:nowrap;text-align:right;width:190px}
+.st-table td.act .st-btn+.st-btn{margin-left:6px}
+.st-table tr.off td:not(.act):not(.ck){opacity:.55}
+.st-table tr.dirty td{background:#151d2b}
+.st-table tr.draft td{background:#12202e}
+.st-table tr.conflict select.code{border-color:#a33b3b}
+.st-table tr.errrow td{padding:0 8px 8px;border-bottom:1px solid var(--border)}
+.st-table tr.errrow .err{margin:0}
+.st-table tr:has(+ tr.errrow:not([hidden])) td{border-bottom:0}
+
+.st-foot{margin-top:14px;color:var(--muted);font-size:12.5px;line-height:1.5}
+.st-foot b{color:var(--text)}
+/* Codes legend: one code per row — letter · code · rule */
+.st-codes{width:auto;margin-top:6px;font-size:12.5px}
+.st-codes td{text-align:left;padding:3px 18px 3px 0;border-bottom:0;color:var(--muted)}
+.st-codes tbody tr:hover,.st-codes tr:hover{background:transparent;cursor:default}
+.st-codes td.l{color:var(--text);font-weight:700;padding-right:10px}
+.st-codes code{color:#c7cdd6;font-size:12px}
+
+.st-toast{position:fixed;left:50%;transform:translateX(-50%);bottom:40px;z-index:60;background:#1b2028;border:1px solid #333b47;
+  color:var(--text);border-radius:9px;padding:9px 14px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.st-toast.ok{border-color:#1c4a2b} .st-toast.bad{border-color:#5b1e22;color:#f7a6a6}

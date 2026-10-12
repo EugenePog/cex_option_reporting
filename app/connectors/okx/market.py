@@ -1,4 +1,4 @@
-"""OKX public market data — index candles (no API key needed).
+"""OKX public market data — index candles and the current index price (no API key needed).
 
 GET /api/v5/market/history-index-candles?instId=BTC-USD&bar=1m&after=<ms>&limit=100
 
@@ -9,6 +9,11 @@ GET /api/v5/market/history-index-candles?instId=BTC-USD&bar=1m&after=<ms>&limit=
   * Public endpoint, limited per IP (about 10 requests / 2 s): requests are spaced by
     MIN_REQUEST_INTERVAL and transient errors (rate limit 50011, system busy, HTTP 429/5xx) are
     retried with backoff (same policy as OkxClient).
+
+GET /api/v5/market/index-tickers?instId=BTC-USD  (🆕 build 5 — the alerts worker's live price)
+
+  * One item: {"instId", "idxPx", "high24h", "low24h", "open24h", "sodUtc0", "sodUtc8", "ts"} —
+    `idxPx` = current index price, `ts` = its time (ms).
 
 The installed python-okx SDK only wraps `index-candles` (recent data), so this calls REST directly.
 """
@@ -32,6 +37,7 @@ from app.connectors.okx.client import (
 logger = logging.getLogger(__name__)
 
 HISTORY_INDEX_CANDLES = "/api/v5/market/history-index-candles"
+INDEX_TICKERS = "/api/v5/market/index-tickers"
 PAGE_LIMIT = 100                    # OKX maximum for index candles
 MIN_REQUEST_INTERVAL = 0.22         # seconds between requests (~9 / 2 s, under the IP limit)
 BAR_SECONDS = {"1m": 60}
@@ -74,6 +80,20 @@ class OkxMarketClient:
         _raise_on_error(resp, "history-index-candles")
         return resp
 
+    @_retry_transient
+    def index_ticker(self, inst_id: str) -> tuple[float, datetime] | None:
+        """Current index price and its time, e.g. ("BTC-USD") → (62415.3, 2026-10-10 06:31:02 UTC);
+        None when OKX returns no price for the index."""
+        self._throttle()
+        self.requests += 1
+        resp = self._http_get(_BASE_URL + INDEX_TICKERS, {"instId": inst_id})
+        _raise_on_error(resp, "index-tickers")
+        for row in resp.get("data") or []:
+            if row.get("instId") == inst_id and row.get("idxPx") not in (None, ""):
+                ts = datetime.fromtimestamp(int(row.get("ts") or 0) / 1000, tz=timezone.utc)
+                return float(row["idxPx"]), ts
+        return None
+
     def iter_index_candles(self, inst_id: str, bar: str, start: datetime,
                            end: datetime) -> Iterator[list[IndexCandleRow]]:
         """Yield pages of COMPLETED candles with start <= ts < end, newest page first.
@@ -115,5 +135,5 @@ def _httpx_get(url: str, params: dict[str, str]) -> dict[str, Any]:
 
     r = httpx.get(url, params=params, timeout=10.0)
     if r.status_code == 429 or r.status_code >= 500:
-        raise OkxTransientError(f"OKX history-index-candles HTTP {r.status_code}")
+        raise OkxTransientError(f"OKX market data HTTP {r.status_code} ({url.rsplit('/', 1)[-1]})")
     return r.json()

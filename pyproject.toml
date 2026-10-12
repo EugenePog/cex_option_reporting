@@ -36,6 +36,9 @@ dependencies = [
     "python-multipart>=0.0.9", # form posts
     "itsdangerous>=2.2",       # session cookies (Starlette SessionMiddleware)
     "bcrypt>=4.0",             # password hashing (used directly; passlib is unmaintained)
+
+    # Worker: Telegram alerts (graph ① boxes)
+    "python-telegram-bot>=21.0",  # async Bot API client (app.worker.telegram_bot)
 ]
 
 [project.optional-dependencies]

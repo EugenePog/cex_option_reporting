@@ -4,10 +4,12 @@ Each CSV under the seed folder is upserted by primary key `id` into its `core` t
 dependency order, then the id sequence is reset. Re-running updates rather than duplicating.
 
 Only the manually-managed settings tables are handled here:
-    user -> cex_account -> subaccount -> strategy -> strategy_rule, and contract_size
-    (contract size per exchange / instrument type / underlying — no FKs)
-(`instrument` is derived by the silver pipeline; `audit_log` / `pipeline_watermark` are app-written;
-`strategy_link` holds the Box builder's manual pins — app-written, never seeded.)
+    user -> cex_account -> subaccount -> strategy -> strategy_rule, contract_size
+    (contract size per exchange / instrument type / underlying — no FKs), and notification_setting
+    (Telegram alerts per asset × notification code — no FKs)
+(`instrument` is derived by the silver pipeline; `audit_log` / `pipeline_watermark` /
+`notification_state` are app-written; `strategy_link` holds the Box builder's manual pins —
+app-written, never seeded.)
 
 `--replace` truncates with CASCADE, which also empties every table referencing core.strategy —
 including core.strategy_link. Manual pins are NOT rebuildable from bronze, so replace refuses to run
@@ -32,6 +34,7 @@ from app.db.models_core import (
     CexAccount,
     ContractSize,
     CoreUser,
+    NotificationSetting,
     Strategy,
     StrategyRule,
     Subaccount,
@@ -47,6 +50,7 @@ SEED_TABLES: list[tuple[str, type]] = [
     ("strategy", Strategy),
     ("strategy_rule", StrategyRule),
     ("contract_size", ContractSize),
+    ("notification_setting", NotificationSetting),
 ]
 _MODEL_BY_NAME = {name: model for name, model in SEED_TABLES}
 

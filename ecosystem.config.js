@@ -45,7 +45,9 @@ module.exports = {
       ...common,
     },
     {
-      name: "worker", // optional: alerts / reports
+      // Telegram alerts for the boxes of Dashboard graph ① (core.notification_setting), every
+      // ALERTS_INTERVAL_SECONDS (default 60 s). Needs TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in .env.
+      name: "worker",
       script: PY,
       args: "-m app.cli worker --loop",
       ...common,

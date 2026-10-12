@@ -257,12 +257,60 @@ docker exec -it cex_pg psql -U cex -d cex_option_reporting \
   -c "select subaccount_id, strategy_id, n_legs, size_coin, coin from gold.box_shape;"
 ```
 
+### 10f. Telegram alerts for graph ① boxes (migration 0022, pm2 `worker`)
+
+The `worker` process sends a Telegram message when a box on graph ① "Price with strategy boxes"
+(a) reaches its top strike, (b) its bottom strike, (c) gets within X % of the top, (d) within Y % of
+the bottom, (e) reaches its last expiry, or (f) is N days before it. Only boxes with at least one
+open leg are watched; each message goes out once per crossing. Critical ones (a, b, e by default)
+start with 🔴 **CRITICAL** (Telegram can't color text), the others with 🟡.
+
+```bash
+pip install -e ".[dev]"           # new dependency: python-telegram-bot
+make migrate                      # 0022: core.notification_setting (+ 6 BTC-USD rows), core.notification_state
+```
+
+Add the bot to `.env` — the same token and chat id your existing monitor uses work:
+
+```bash
+TELEGRAM_BOT_TOKEN=123456:ABC...  # from @BotFather
+TELEGRAM_CHAT_ID=123456789        # your chat (a group id starts with -)
+# optional, defaults shown:
+# ALERTS_INTERVAL_SECONDS=60  ALERTS_REARM_MINUTES=60  ALERTS_EXPIRY_GRACE_HOURS=12
+# ALERTS_MAX_PRICE_AGE_MINUTES=90
+```
+
+(Chat id unknown? Send your bot any message, then open
+`https://api.telegram.org/bot<TOKEN>/getUpdates` — it is `result[].message.chat.id`.)
+
+```bash
+make alerts-test                  # one "alerts are set up" message in the chat
+make alerts-dry-run               # what would be sent right now (sends and stores nothing)
+pm2 start ecosystem.config.js --only worker    # or: pm2 restart worker
+pm2 logs worker
+```
+
+Settings (per asset — every account and box of BTC-USD shares them) are in `core.notification_setting`
+and are read on every check, e.g.:
+
+```bash
+docker exec -it cex_pg psql -U cex -d cex_option_reporting \
+  -c "select id, asset, code, threshold, is_enabled, is_critical from core.notification_setting order by id;" \
+  -c "update core.notification_setting set threshold = 3 where asset = 'BTC-USD' and code = 'near_top_pct';" \
+  -c "update core.notification_setting set is_enabled = false where asset = 'BTC-USD' and code = 'last_expiry_days';" \
+  -c "select * from core.notification_state order by last_sent_at desc nulls last limit 20;"
+```
+
+Keep `seed/notification_setting.csv` in step if you change values in the DB — `make seed` writes the
+CSV values back.
+
 ---
 
 ## Running everything as services (pm2)
 
 ```bash
-pm2 start ecosystem.config.js    # collector-snapshot + collector-history + pipeline + web (+ worker)
+pm2 start ecosystem.config.js    # collector-snapshot + collector-history + pipeline + web + worker
+                                 # (worker = Telegram alerts, needs TELEGRAM_* in .env — see 10f)
 pm2 status
 pm2 logs
 pm2 stop all

@@ -1,8 +1,9 @@
 """Core-layer ORM models (schema: core) — settings / dimension tables.
 
 These are the manually-managed tables (users, accounts, subaccounts, strategies, rules, contract
-sizes per exchange) plus a couple of system tables (audit_log, pipeline_watermark) and the
-app-written manual strategy links (strategy_link, written by the admin Box builder — NOT seeded).
+sizes per exchange, Telegram notification settings) plus a few system tables (audit_log,
+pipeline_watermark, notification_state — written by the alerts worker) and the app-written manual
+strategy links (strategy_link, written by the admin Box builder — NOT seeded).
 Silver/gold rows are scoped and tagged via these. Kept in their own module; imported by
 app.db.models so a single import registers all.
 """
@@ -205,6 +206,73 @@ class ContractSize(Base):
     ct_val: Mapped[float] = mapped_column(Numeric)              # coin units per contract
     ct_val_ccy: Mapped[str] = mapped_column(String(16))         # 'BTC'
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# Telegram notification codes for the boxes of graph ① "Price with strategy boxes" (0022).
+# a–d compare the live index price with the box strikes, e–f the time with the box's last expiry.
+NOTIFICATION_CODES: tuple[str, ...] = (
+    "top_strike",        # a  price ≥ top strike                         (threshold unused: 0)
+    "bottom_strike",     # b  price ≤ bottom strike                      (threshold unused: 0)
+    "near_top_pct",      # c  price ≥ top strike − X %                   (threshold = X, percent)
+    "near_bottom_pct",   # d  price ≤ bottom strike + Y %                (threshold = Y, percent)
+    "last_expiry",       # e  time reaches the box's last expiry         (threshold unused: 0)
+    "last_expiry_days",  # f  time reaches the last expiry − N days      (threshold = N, days)
+)
+
+
+class NotificationSetting(Base):
+    """Telegram notification settings — seeded / edited by hand. Added in 0022.
+
+    One row per asset × notification code: every account and box (strategy) of that asset shares
+    the same settings. `asset` is the option underlying / index, e.g. 'BTC-USD'. Read by the alerts
+    worker (`python -m app.cli worker --loop`, pm2 `worker`), which notifies about *alive* boxes
+    only — boxes with at least one leg that is still open (not closed, not expired).
+    """
+
+    __tablename__ = "notification_setting"
+    __table_args__ = (
+        UniqueConstraint("asset", "code", name="uq_notification_setting"),
+        CheckConstraint("code IN (" + ", ".join(f"'{c}'" for c in NOTIFICATION_CODES) + ")",
+                        name="ck_notification_setting_code"),
+        CheckConstraint("threshold >= 0", name="ck_notification_setting_threshold"),
+        {"schema": CORE},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset: Mapped[str] = mapped_column(String(32))              # 'BTC-USD'
+    code: Mapped[str] = mapped_column(String(32))               # one of NOTIFICATION_CODES
+    threshold: Mapped[float] = mapped_column(Numeric, default=0)  # X / Y percent, N days; else 0
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)   # on / off
+    is_critical: Mapped[bool] = mapped_column(Boolean, default=False)  # 🔴 CRITICAL in the chat
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class NotificationState(Base):
+    """Alerts worker bookkeeping — app-written, not seeded. Added in 0022.
+
+    One row per box (subaccount × strategy × underlying) × notification code, so each notification
+    is sent once per crossing: a price notification is *disarmed* when sent and *re-armed* when the
+    price is back on the other side (and the re-arm pause has passed, ALERTS_REARM_MINUTES); a time
+    notification remembers the box's last expiry it was sent for.
+    """
+
+    __tablename__ = "notification_state"
+    __table_args__ = {"schema": CORE}
+
+    subaccount_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("core.subaccount.id"), primary_key=True)
+    strategy_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("core.strategy.id"), primary_key=True)
+    underlying: Mapped[str] = mapped_column(String(32), primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    armed: Mapped[bool] = mapped_column(Boolean, default=True)        # price codes
+    fired_for_ends_at: Mapped[datetime | None] = mapped_column(       # time codes
+        DateTime(timezone=True), nullable=True)
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_value: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # price when sent
+    last_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

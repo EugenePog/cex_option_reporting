@@ -6,7 +6,7 @@
     python -m app.cli backfill           # collect full available history once (manual)
     python -m app.cli index-candles [--since YYYY-MM-DD]  # BTC-USD 1m index candles (gaps only)
     python -m app.cli pipeline [--stage silver|gold|all] [--loop]  # transforms (default: all)
-    python -m app.cli worker  [--loop]   # alerts / reports          (stub)
+    python -m app.cli worker  [--loop] [--dry-run] [--test]  # Telegram alerts for graph ① boxes
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def seed(
         False, help="With --replace: allow deleting the Box builder's manual strategy links."),
 ) -> None:
     """Load core/settings CSVs (user, cex_account, subaccount, strategy, strategy_rule,
-    contract_size) into the DB."""
+    contract_size, notification_setting) into the DB."""
     setup_logging()
     from app.db.seed_loader import SeedReplaceWouldWipeLinks, load_seed
 
@@ -245,10 +245,43 @@ def pipeline(
 
 
 @app.command()
-def worker(loop: bool = typer.Option(False, help="Run continuously.")) -> None:
-    """Run alerts / scheduled reports (stub)."""
+def worker(
+    loop: bool = typer.Option(False, help="Check every ALERTS_INTERVAL_SECONDS (pm2 `worker`)."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+                                 help="Print what would be sent now; send nothing, store nothing."),
+    test: bool = typer.Option(False, "--test", help="Send one test message to the Telegram chat."),
+) -> None:
+    """Telegram alerts for the boxes of Dashboard graph ① "Price with strategy boxes".
+
+    What to watch is in core.notification_setting (per asset: top / bottom strike reached, within
+    X % / Y % of them, last expiry reached, N days before it — each on/off, critical or not). Only
+    boxes with at least one open leg are watched. Telegram: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
+    """
     setup_logging()
-    typer.echo(f"[worker] loop={loop} — TODO: wire app.worker")
+    from app.worker import alerts, notifier
+
+    if test:
+        if not notifier.is_configured():
+            typer.echo("Telegram is not configured: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID "
+                       "in .env.", err=True)
+            raise typer.Exit(1)
+        ok = alerts.send_setup_message()
+        typer.echo("Test message sent." if ok else "Test message FAILED — see the log above.")
+        raise typer.Exit(0 if ok else 1)
+    if loop:
+        alerts.run_loop()
+        return
+    res = alerts.run_once(dry_run=dry_run)
+    if res.skipped:
+        typer.echo(f"[alerts] nothing checked: {res.skipped}")
+        return
+    typer.echo(f"[alerts] {res.alive} alive box(es) of {res.boxes} checked")
+    if dry_run:
+        typer.echo(f"[alerts] dry run — {len(res.dry_run)} message(s) would be sent:")
+        for m in res.dry_run:
+            typer.echo("\n" + m)
+    else:
+        typer.echo(f"[alerts] {len(res.sent)} sent, {len(res.failed)} failed")
 
 
 if __name__ == "__main__":

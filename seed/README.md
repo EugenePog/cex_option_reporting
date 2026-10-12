@@ -9,7 +9,7 @@ starting templates; edit them or create real `<table>.csv` files alongside them.
 cd seed
 for f in *.example.csv; do cp "$f" "${f%.example.csv}.csv"; done
 # then edit user.csv, cex_account.csv, subaccount.csv, strategy.csv, strategy_rule.csv,
-# contract_size.csv
+# contract_size.csv, notification_setting.csv
 ```
 
 > Note: `cex_account` credential columns are intentionally left blank — for dev the collector reads
@@ -31,7 +31,7 @@ python -m app.cli seed --replace         # truncate the seed tables first, then 
   and the loader upserts on `id`, so re-running updates rather than duplicating. Sequences are reset
   to `max(id)` after each load.
 - **Load order / dependencies:** `user` → `cex_account` → `subaccount` → `strategy` → `strategy_rule`;
-  `contract_size` has no dependencies.
+  `contract_size` and `notification_setting` have no dependencies.
 - `match_json` is JSON inside a CSV cell — wrap the whole cell in double quotes and double any inner
   quotes, e.g. `"{""inst_pattern"": ""BTC-USD-*""}"`.
 - Tables NOT seeded here: `instrument` (populated by the silver pipeline), `audit_log` and
@@ -95,6 +95,26 @@ The migration already inserts the three OKX option rows (ids 1–3), so seeding 
 needed to change or add rows. A leg whose (exchange, type, underlying) has no row gets no coin
 size in gold (`size_coin` NULL — the chart then shows contracts) and the payoff report counts
 1 contract = 1 coin; the pipeline logs a warning naming the missing row.
+
+**`notification_setting`** — Telegram alerts for the boxes of Dashboard graph ① (migration 0022)
+
+One row per **asset × code**; every account and box of that asset uses it. The alerts worker
+(`python -m app.cli worker --loop`, pm2 `worker`) reads the table on every check, so a change in the
+DB takes effect within a minute — no restart. An asset without rows gets no alerts.
+
+| column | allowed values |
+|---|---|
+| `asset` | the option underlying / index, e.g. `BTC-USD` (same as `underlying` elsewhere) |
+| `code` | `top_strike` (a: price ≥ top strike of the box), `bottom_strike` (b: price ≤ bottom strike), `near_top_pct` (c: price ≥ top − X %), `near_bottom_pct` (d: price ≤ bottom + Y %), `last_expiry` (e: the box's last expiry reached), `last_expiry_days` (f: N days before the last expiry) |
+| `threshold` | X / Y in **percent** for c / d (e.g. `2` = 2 %), N in **days** for f (may be fractional, `0.5` = 12 h); `0` for a, b, e |
+| `is_enabled` | `true` / `false` — on / off |
+| `is_critical` | `true` / `false` — critical messages start with 🔴 **CRITICAL** (Telegram has no red text), others with 🟡; default true for a, b, e |
+| `note` | free text |
+
+The migration already inserts the six BTC-USD rows (ids 1–6: all on; a, b, e critical; X = Y = 2;
+N = 1), so seeding this file is only needed to change them or add assets (e.g. ids 7–12 for
+`ETH-USD`). A change made directly in the DB (Adminer / psql) is overwritten by the next `make seed`
+if this file still has the old values — change it here too.
 
 **`strategy_rule`**
 

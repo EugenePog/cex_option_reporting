@@ -138,6 +138,23 @@ class Settings(BaseSettings):
         """First INGEST_TIME_UTC time (kept for callers that expect a single time)."""
         return self.ingest_time_tuples()[0]
 
+    # Telegram alerts (worker process, `python -m app.cli worker --loop`) for the boxes of graph ①.
+    # What to notify about lives in core.notification_setting; these are the delivery settings.
+    telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
+    # Bot API endpoint override — tests only (a local stub); empty = https://api.telegram.org
+    telegram_api_base_url: str = Field(default="", alias="TELEGRAM_API_BASE_URL")
+    alerts_interval_seconds: int = Field(default=60, alias="ALERTS_INTERVAL_SECONDS")
+    # A price alert that went off can go off again only after the price was back on the other
+    # side AND this many minutes passed since it was sent (no ping-pong around a strike).
+    alerts_rearm_minutes: int = Field(default=60, alias="ALERTS_REARM_MINUTES")
+    # "Last expiry reached" is sent from the expiry moment for this long (catches up after a pause
+    # of the worker; older expiries are not announced).
+    alerts_expiry_grace_hours: float = Field(default=12, alias="ALERTS_EXPIRY_GRACE_HOURS")
+    # When the live index price can't be fetched, the newest stored 1-minute candle is used if it
+    # is not older than this; otherwise price alerts wait for the next check.
+    alerts_max_price_age_minutes: int = Field(default=90, alias="ALERTS_MAX_PRICE_AGE_MINUTES")
+
     # Web
     web_host: str = Field(default="0.0.0.0", alias="WEB_HOST")
     web_port: int = Field(default=8000, alias="WEB_PORT")

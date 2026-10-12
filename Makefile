@@ -1,4 +1,4 @@
-.PHONY: help install dev db-up db-down migrate revision init-db seed collect-snapshot-loop collect-loop backfill pipeline pipeline-silver pipeline-gold debug-expiries debug-payoff web test lint format typecheck
+.PHONY: help install dev db-up db-down migrate revision init-db seed collect-snapshot-loop collect-loop backfill pipeline pipeline-silver pipeline-gold debug-expiries debug-payoff web worker alerts-dry-run alerts-test test lint format typecheck
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -50,6 +50,15 @@ debug-payoff:  ## Diagnose report ③ (payoff): expiry coverage + settlement-pri
 
 web:  ## Run the web app (dev, autoreload)
 	uvicorn app.web.main:app --reload --host 0.0.0.0 --port 8000
+
+worker:  ## Telegram alerts for graph ① boxes — check every ALERTS_INTERVAL_SECONDS (pm2 `worker`)
+	python -m app.cli worker --loop
+
+alerts-dry-run:  ## Print the Telegram alerts that would be sent now (sends and stores nothing)
+	python -m app.cli worker --dry-run
+
+alerts-test:  ## Send one test message to the Telegram chat (checks TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)
+	python -m app.cli worker --test
 
 test:  ## Run tests
 	pytest -q

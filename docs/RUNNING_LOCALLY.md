@@ -344,6 +344,10 @@ Then reload the Dashboard.
 - **Rev 2:** the date axis has twice as many ticks (e.g. every 3 days for a month), re-picked as you
   zoom. The dotted vertical line is **now** — hover it for the date and time (UTC and your local time);
   it moves on every minute.
+- **Build 10 — graphs ② and ②b** work the same way on both of their charts (value scale on the
+  left). With **Sync timelines** on (default) the two charts move together; one click gives the wheel
+  to both. Days outside the reporting period load as you move. The **A ⟲ ?** buttons appear in the
+  corner under the value scale while the mouse is over the chart. Both graphs now show times in UTC.
 
 ---
 

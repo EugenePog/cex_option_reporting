@@ -91,6 +91,18 @@ def _period_start(period: str, today: date) -> date | None:
     return None  # 'all'
 
 
+def _available(s, ts_col, ts_where, date_col, date_where) -> list[str | None]:
+    """build 10: first / last moment with data for a balance series + a daily P&L series (any
+    period), as UTC ISO — graphs ② / ②b load more data while moved / zoomed, but not past these."""
+    t_lo, t_hi = s.execute(select(func.min(ts_col), func.max(ts_col)).where(*ts_where)).one()
+    d_lo, d_hi = s.execute(select(func.min(date_col), func.max(date_col)).where(*date_where)).one()
+    lows = [t_lo] + ([datetime.combine(d_lo, time.min, tzinfo=timezone.utc)] if d_lo else [])
+    highs = [t_hi] + ([datetime.combine(d_hi + timedelta(days=1), time.min, tzinfo=timezone.utc)]
+                      if d_hi else [])
+    lows, highs = [v for v in lows if v], [v for v in highs if v]
+    return [_iso(min(lows)) if lows else None, _iso(max(highs)) if highs else None]
+
+
 # --------------------------------------------------------------------------- #
 @router.get("/filters")
 def filters(user: CurrentUser = Depends(get_current_user)) -> dict:
@@ -134,6 +146,9 @@ def filters(user: CurrentUser = Depends(get_current_user)) -> dict:
 def asset_equity(ccy: str | None = None, subaccount: int | None = None,
                  frm: str | None = None, till: str | None = None,
                  user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Graph ②b: one asset's balance (in kind) over time + daily net P&L, for frm..till.
+    build 10: also called for the days just outside the view while the graph is moved / zoomed;
+    `available` = first / last data moment of that asset."""
     subs = _subs(user, subaccount)
     fd, td, lo, hi = _date_bounds(frm, till)
     with SessionLocal() as s:
@@ -164,7 +179,13 @@ def asset_equity(ccy: str | None = None, subaccount: int | None = None,
             if td is not None:
                 pq = pq.where(AssetPnlDaily.date <= td)
             pnl_rows = s.execute(pq.group_by(AssetPnlDaily.date).order_by(AssetPnlDaily.date)).all()
-    balance = [{"t": t.isoformat(), "v": _f(v)} for t, v in bal_rows]
+        available = _available(
+            s, AssetBalanceTimeseries.captured_at,
+            (AssetBalanceTimeseries.subaccount_id.in_(subs), AssetBalanceTimeseries.ccy == ccy),
+            AssetPnlDaily.date, (AssetPnlDaily.subaccount_id.in_(subs), AssetPnlDaily.ccy == ccy),
+        ) if ccy else [None, None]
+    # build 10: times in UTC (as graph ①), whatever the database session's time zone
+    balance = [{"t": _iso(t), "v": _f(v)} for t, v in bal_rows]
     pnl = [{"date": d.isoformat(), "net": _f(n), "realized": _f(r), "unrealized": _f(u),
             "fees": _f(fee)} for d, n, r, u, fee in pnl_rows]
     header = {}
@@ -172,7 +193,7 @@ def asset_equity(ccy: str | None = None, subaccount: int | None = None,
         first, last = balance[0]["v"], balance[-1]["v"]
         header = {"delta": last - first, "pct": (last / first - 1) * 100 if first else None,
                   "since": balance[0]["t"][:10]}
-    return {"ccy": ccy, "balance": balance, "pnl": pnl, "header": header}
+    return {"ccy": ccy, "balance": balance, "pnl": pnl, "header": header, "available": available}
 
 
 # ① Price with strategy boxes --------------------------------------------- #
@@ -393,6 +414,10 @@ def price_candles(start: str, end: str, underlying: str | None = None,
 @router.get("/equity")
 def equity(subaccount: int | None = None, frm: str | None = None, till: str | None = None,
            user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Graph ②: account equity (USD) over time + daily net P&L, for the period frm..till.
+    build 10: the graph also calls it for the days just outside what it shows while it is moved /
+    zoomed (same filters); `available` = first / last data moment, so it stops at the data's
+    edge."""
     subs = _subs(user, subaccount)
     fd, td, lo, hi = _date_bounds(frm, till)
     with SessionLocal() as s:
@@ -416,7 +441,11 @@ def equity(subaccount: int | None = None, frm: str | None = None, till: str | No
         if td is not None:
             pnl_q = pnl_q.where(PnlDaily.date <= td)
         pnl_rows = s.execute(pnl_q.group_by(PnlDaily.date).order_by(PnlDaily.date)).all()
-    equity_series = [{"t": t.isoformat(), "v": _f(v)} for t, v in eq_rows]
+        available = _available(s, BalanceTimeseries.captured_at,
+                               (BalanceTimeseries.subaccount_id.in_(subs),),
+                               PnlDaily.date, (PnlDaily.subaccount_id.in_(subs),))
+    # build 10: times in UTC (as graph ①), whatever the database session's time zone
+    equity_series = [{"t": _iso(t), "v": _f(v)} for t, v in eq_rows]
     pnl = [{"date": d.isoformat(), "net": _f(n), "realized": _f(r),
             "unrealized": _f(u), "fees": _f(fee), "net_coin": _f(nc)}
            for d, n, r, u, fee, nc in pnl_rows]
@@ -425,7 +454,7 @@ def equity(subaccount: int | None = None, frm: str | None = None, till: str | No
         first, last = equity_series[0]["v"], equity_series[-1]["v"]
         header = {"delta": last - first, "pct": (last / first - 1) * 100 if first else None,
                   "since": equity_series[0]["t"][:10]}
-    return {"equity": equity_series, "pnl": pnl, "header": header}
+    return {"equity": equity_series, "pnl": pnl, "header": header, "available": available}
 
 
 # ④ Strike × expiry position map ------------------------------------------- #

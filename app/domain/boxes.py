@@ -170,13 +170,16 @@ def exposure_segments(legs: list[Leg], now: datetime) -> list[Segment]:
 
 BARS = ("1h", "4h", "1d")
 BAR_STEP = {"1h": timedelta(hours=1), "4h": timedelta(hours=4), "1d": timedelta(days=1)}
+# Auto candle size by the visible range: (bar, longest range in days it is used for); longer → 1d.
+# build 9: also sent to the browser (/api/price-boxes "auto_bars"), so graph ① switches candles
+# with the zoom by the same rule.
+AUTO_BAR_MAX_DAYS = (("1h", 14), ("4h", 90))
 
 
 def auto_bar(t0: datetime, t1: datetime) -> str:
     """Candle size for a visible range: ≤ 14 days → 1h, ≤ 90 days → 4h, longer → 1d."""
     days = (t1 - t0).total_seconds() / 86400
-    if days <= 14:
-        return "1h"
-    if days <= 90:
-        return "4h"
+    for bar, max_days in AUTO_BAR_MAX_DAYS:
+        if days <= max_days:
+            return bar
     return "1d"

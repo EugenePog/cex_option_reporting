@@ -3,7 +3,8 @@
 All queries are scoped to the current user's subaccounts (admin => all). See
 REPORT_GOLD_ATTRIBUTE_MAPPING.md for the column→visual mapping this implements.
 The Dashboard reads current/aggregate gold — graph ① "Price with strategy boxes" (/price-boxes)
-reads gold.index_candle + gold.box_shape + gold.position_leg; the Analyze tab recomputes from
+reads gold.index_candle + gold.box_shape + gold.position_leg, and /price-candles (build 9) more
+index candles while the chart is dragged / zoomed past them; the Analyze tab recomputes from
 gold.deal_ledger so it responds live to filters (the precomputed perf tables are used for
 fixed-period admin views).
 """
@@ -12,7 +13,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 
 from app.db.base import SessionLocal
@@ -33,6 +34,7 @@ from app.db.models_gold import (
     UnderlyingPrice,
 )
 from app.domain.boxes import (
+    AUTO_BAR_MAX_DAYS,
     BAR_STEP,
     BARS,
     Leg,
@@ -183,6 +185,44 @@ def _num(v) -> float | None:
     return float(v) if v is not None else None
 
 
+def _price_source(s, subs: list[int], underlying: str | None):
+    """(underlying, cex, priced underlyings) for graph ①: index candles come from the exchange of
+    the user's accounts; without an underlying, the one with the most legs that has price data.
+    Shared by /price-boxes and /price-candles (build 9), so both read the same candles."""
+    sub_cex = dict(s.execute(select(Subaccount.id, Subaccount.cex_code)
+                             .where(Subaccount.id.in_(subs))).all())
+    cexes = sorted(set(sub_cex.values()))
+    priced = set(s.execute(select(IndexCandle.cex_code, IndexCandle.inst_id)
+                           .where(IndexCandle.cex_code.in_(cexes)).distinct()).all())
+    priced_ul = sorted({inst for _cex, inst in priced})
+    chosen = underlying
+    if not chosen:
+        best = s.execute(
+            select(GoldPositionLeg.underlying, func.count())
+            .where(GoldPositionLeg.subaccount_id.in_(subs),
+                   GoldPositionLeg.underlying.in_(priced_ul))
+            .group_by(GoldPositionLeg.underlying).order_by(func.count().desc())).first()
+        chosen = best[0] if best else (priced_ul[0] if priced_ul else None)
+    cex = next((c for c in cexes if (c, chosen) in priced), None)
+    return chosen, cex, priced_ul
+
+
+def _candles(s, cex: str, inst: str, bar: str, t0: datetime, t1: datetime):
+    """Index candles of one size covering [t0, t1): the candle that contains t0 included."""
+    return s.execute(
+        select(IndexCandle.ts, IndexCandle.open, IndexCandle.high, IndexCandle.low,
+               IndexCandle.close)
+        .where(IndexCandle.cex_code == cex, IndexCandle.inst_id == inst,
+               IndexCandle.bar == bar, IndexCandle.ts >= t0 - BAR_STEP[bar],
+               IndexCandle.ts < t1)
+        .order_by(IndexCandle.ts)).all()
+
+
+def _candle_rows(candles) -> list[dict]:
+    return [{"t": _iso(ts), "o": _f(o), "h": _f(h), "l": _f(lo_), "c": _f(c)}
+            for ts, o, h, lo_, c in candles]
+
+
 @router.get("/price-boxes")
 def price_boxes(underlying: str | None = None, subaccount: int | None = None, bar: str = "auto",
                 frm: str | None = None, till: str | None = None,
@@ -200,21 +240,7 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
     now = datetime.now(timezone.utc)
     fd, td, lo, hi = _date_bounds(frm, till)
     with SessionLocal() as s:
-        sub_cex = dict(s.execute(select(Subaccount.id, Subaccount.cex_code)
-                                 .where(Subaccount.id.in_(subs))).all())
-        cexes = sorted(set(sub_cex.values()))
-        priced = set(s.execute(select(IndexCandle.cex_code, IndexCandle.inst_id)
-                               .where(IndexCandle.cex_code.in_(cexes)).distinct()).all())
-        priced_ul = sorted({inst for _cex, inst in priced})
-        chosen = underlying
-        if not chosen:
-            best = s.execute(
-                select(GoldPositionLeg.underlying, func.count())
-                .where(GoldPositionLeg.subaccount_id.in_(subs),
-                       GoldPositionLeg.underlying.in_(priced_ul))
-                .group_by(GoldPositionLeg.underlying).order_by(func.count().desc())).first()
-            chosen = best[0] if best else (priced_ul[0] if priced_ul else None)
-        cex = next((c for c in cexes if (c, chosen) in priced), None)
+        chosen, cex, priced_ul = _price_source(s, subs, underlying)   # build 9: shared helper
 
         rows = s.execute(select(GoldPositionLeg).where(
             GoldPositionLeg.subaccount_id.in_(subs), GoldPositionLeg.underlying == chosen,
@@ -254,17 +280,13 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
             t0 = lo
         if td is not None:
             t1 = datetime.combine(td + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        if t1 <= t0:                                 # build 9: only 'till', before any box → the
+            t0 = t1 - timedelta(days=30)             # 30 days up to it (was an inverted range)
         bar_auto = bar not in BARS
         bar_used = auto_bar(t0, t1) if bar_auto else bar
         candles, last = [], None
         if cex:
-            candles = s.execute(
-                select(IndexCandle.ts, IndexCandle.open, IndexCandle.high, IndexCandle.low,
-                       IndexCandle.close)
-                .where(IndexCandle.cex_code == cex, IndexCandle.inst_id == chosen,
-                       IndexCandle.bar == bar_used, IndexCandle.ts >= t0 - BAR_STEP[bar_used],
-                       IndexCandle.ts < t1)
-                .order_by(IndexCandle.ts)).all()
+            candles = _candles(s, cex, chosen, bar_used, t0, t1)
             last = s.execute(
                 select(IndexCandle.ts, IndexCandle.close, IndexCandle.n_minutes)
                 .where(IndexCandle.cex_code == cex, IndexCandle.inst_id == chosen,
@@ -305,14 +327,66 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
     return {
         "underlying": chosen, "underlyings": priced_ul, "cex_code": cex,
         "bar": bar_used, "bar_auto": bar_auto, "now": _iso(now), "coin": coin,
+        # build 9: the auto candle-size rule, so the chart switches 1H / 4H / 1D with its zoom
+        "auto_bars": [{"bar": b, "max_days": d} for b, d in AUTO_BAR_MAX_DAYS],
         "period": {"from": fd.isoformat() if fd else None, "till": td.isoformat() if td else None},
         "range": [_iso(t0), _iso(t1)],
-        "candles": [{"t": _iso(ts), "o": _f(o), "h": _f(h), "l": _f(lo_), "c": _f(c)}
-                    for ts, o, h, lo_, c in candles],
+        "candles": _candle_rows(candles),
         "last": ({"t": _iso(last[0] + timedelta(minutes=int(last[2]) - 1)), "close": _f(last[1])}
                  if last else None),
         "boxes": out_boxes, "legs": out_legs, "exposure": exposure,
     }
+
+
+# ① candles for any window of graph ① (build 9: navigation beyond the reporting period) ---- #
+MAX_CANDLES = 5000   # one /price-candles answer at most (≈ 208 days of 1H, 13 years of 1D)
+
+
+def _parse_ts(v: str | None) -> datetime | None:
+    """ISO date or date-time; no offset = UTC."""
+    if not v:
+        return None
+    try:
+        t = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+@router.get("/price-candles")
+def price_candles(start: str, end: str, underlying: str | None = None,
+                  subaccount: int | None = None, bar: str = "auto",
+                  user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Index candles of graph ① for a time window [start, end) — the chart asks for them while it
+    is dragged or zoomed past the candles it has, and for another candle size when Candles = Auto
+    and the zoom crosses 14 / 90 days. Same source as /price-boxes (the exchange of the user's
+    accounts; the same default underlying). `bar` = 1h / 4h / 1d (anything else: by the window
+    length, like Auto). At most MAX_CANDLES: a longer window is cut to its middle, and the answer
+    says which window it covers (`start` / `end`); `available` = the first / last candle of that
+    size."""
+    t0, t1 = _parse_ts(start), _parse_ts(end)
+    if t0 is None or t1 is None or t1 <= t0:
+        raise HTTPException(status_code=400,
+                            detail="start / end: ISO date-times with start < end")
+    subs = _subs(user, subaccount)
+    bar_auto = bar not in BARS
+    bar_used = auto_bar(t0, t1) if bar_auto else bar
+    step = BAR_STEP[bar_used]
+    if t1 - t0 > step * MAX_CANDLES:                 # too long: keep the middle
+        mid = t0 + (t1 - t0) / 2
+        t0, t1 = mid - step * (MAX_CANDLES // 2), mid + step * (MAX_CANDLES // 2)
+    candles, first, last = [], None, None
+    with SessionLocal() as s:
+        chosen, cex, _priced = _price_source(s, subs, underlying)
+        if cex:
+            candles = _candles(s, cex, chosen, bar_used, t0, t1)
+            first, last = s.execute(
+                select(func.min(IndexCandle.ts), func.max(IndexCandle.ts))
+                .where(IndexCandle.cex_code == cex, IndexCandle.inst_id == chosen,
+                       IndexCandle.bar == bar_used)).one()
+    return {"underlying": chosen, "cex_code": cex, "bar": bar_used, "bar_auto": bar_auto,
+            "start": _iso(t0), "end": _iso(t1), "available": [_iso(first), _iso(last)],
+            "candles": _candle_rows(candles)}
 
 
 # ② Equity curve & daily net P&L ------------------------------------------- #

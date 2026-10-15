@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Dashboard · CEX Option Reporting{% endblock %}
 {% block nav_dash %}active{% endblock %}
+{% block head %}<script src="/static/chartnav.js?v={{ asset_ver }}"></script>{% endblock %}
 {% block body %}
 <h1 class="page">Dashboard</h1>
 <p class="sub">Open book &amp; performance across strikes and maturities.</p>
@@ -17,7 +18,10 @@
       open time (tick) to expiry (tick) — closed early: a dot at the close, then dashed to expiry; the shaded
       side is where the leg pays off — above a call, below a put; green = bought, red = sold. The box covers
       all its legs; the label is the box's total size. Below: total open size (legs count until closed).
-      Times in UTC.</p>
+      Times in UTC.<br>Navigate like TradingView: drag the chart to move; click it, then use the wheel to zoom
+      (trackpad: two fingers move / zoom, pinch zooms); drag or scroll the price / date scale to stretch it;
+      double-click to go back. More candles load as you move; with Candles = Auto their size follows the zoom.
+      <b>?</b> under the price scale lists everything.</p>
     <div class="rpbar">
       <label>Reporting period</label>
       <select id="rp-pb">
@@ -233,14 +237,18 @@ function pbLegHover(l, b){
 }
 
 async function renderPriceBoxes(){
+  const gen = ++PB.gen;                        // build 9: the newest render wins (and owns PB)
+  clearTimeout(PB.loadT);
+  clearInterval(PB.nowTimer);                  // build 9 rev 2: the "now" line of the old render
+  PB.nowShape = null;
   const d = await api("/price-boxes", { underlying: state.underlying, subaccount: state.subaccount,
                                         bar: document.getElementById("pb-bar").value,
                                         ...periodParams("pb") });
-  if (!d) return;
+  if (!d || gen !== PB.gen) return;
   const last = d.last, lastC = d.candles.length ? d.candles[d.candles.length - 1] : null;
   document.getElementById("pb-meta").innerHTML = d.underlying
     ? `<b style="color:#e6edf7">${escH(d.underlying)}</b> index (${escH(d.cex_code || "–")}) · ` +
-      `${d.bar.toUpperCase()} candles${d.bar_auto ? " (auto)" : ""}` +
+      `<span id="pb-bar-now">${pbBarText(d.bar, d.bar_auto)}</span>` +
       (last ? ` · last <b style="color:#e6edf7">${fmtPx(last.close)}</b> at ${fmtUtc(last.t)}` : "") +
       ` · ${plural(d.boxes.filter(b => !b.is_unassigned).length, "box", "boxes")}, ` +
       `${plural(d.legs.length, "leg", "legs")} in the period`
@@ -248,10 +256,18 @@ async function renderPriceBoxes(){
   if (!d.candles.length && !d.boxes.length) { Plotly.purge("c-pricebox"); return; }
 
   const traces = [], shapes = [], ann = [];
-  if (d.candles.length) traces.push({
+  // build 9: the navigation state of this render (candles, price levels, box labels)
+  Object.assign(PB, {d, ul: d.underlying, cex: d.cex_code, bar: d.bar, barSel: d.bar_auto ? "auto" : d.bar,
+    autoBars: d.auto_bars || [{bar: "1h", max_days: 14}, {bar: "4h", max_days: 90}],
+    home: [Date.parse(d.range[0]), Date.parse(d.range[1])], now: Date.parse(d.now),
+    cover: [Date.parse(d.range[0]), Date.parse(d.range[1])], lo: -Infinity, hi: Date.parse(d.now),
+    busy: false, spans: [], labels: [], view: null});
+  pbSetCandles(d.candles.map(c => ({t: Date.parse(c.t), o: c.o, h: c.h, l: c.l, c: c.c})));
+  // the candlestick is always trace 0 when there is a price source: candles loaded while you
+  // drag / zoom go into it
+  if (d.candles.length || d.cex_code) traces.push({
     type: "candlestick", name: d.underlying, showlegend: false, xaxis: "x", yaxis: "y",
-    x: d.candles.map(c => plotT(c.t)), open: d.candles.map(c => c.o), high: d.candles.map(c => c.h),
-    low: d.candles.map(c => c.l), close: d.candles.map(c => c.c),
+    x: PB.cd.x, open: PB.cd.o, high: PB.cd.h, low: PB.cd.l, close: PB.cd.c,
     increasing: {line: {color: "#26a69a", width: 1}, fillcolor: "#26a69a"},
     decreasing: {line: {color: "#ef5350", width: 1}, fillcolor: "#ef5350"},
   });
@@ -280,6 +296,10 @@ async function renderPriceBoxes(){
         hoveron: "fills", hoverinfo: "text", text: pbBoxHover(b), hoverlabel: pbLabel(col)});
       // label at the box's left edge, or at the left edge of the view when the box starts before it
       const lx = Date.parse(b.started_at) < Date.parse(d.range[0]) ? plotT(d.range[0]) : x0;
+      PB.labels.push({i: ann.length, t0: Date.parse(b.started_at), t1: Date.parse(b.ends_at),
+                      x: Date.parse(b.started_at) < PB.home[0] ? PB.home[0] : Date.parse(b.started_at)});
+      PB.spans.push({t0: Date.parse(b.started_at), t1: Date.parse(b.ends_at), lo: b.strike_lo,
+                     hi: b.strike_hi, grp});
       ann.push({x: lx, y: b.strike_hi, xanchor: "left", yanchor: "bottom", showarrow: false, xshift: 2,
         text: `<b>${escH(b.label)}</b>  ${escH(b.name)}`, font: {color: col, size: 11},
         bgcolor: "rgba(20,23,28,0.75)", borderpad: 2});
@@ -292,6 +312,8 @@ async function renderPriceBoxes(){
       // payoff side while the leg is held (open → expiry, or → the early close): above a call,
       // below a put; green bought, red sold — nested bands, all starting at the line
       const ot = (l.opt_type || "").toUpperCase(), sd = (l.side || "").toLowerCase();
+      const ad = (ot === "C" ? 1 : ot === "P" ? -1 : 0) * areaH;      // shaded side, for the price fit
+      PB.spans.push({t0: Date.parse(a), t1: Date.parse(e), lo: Math.min(k, k + ad), hi: Math.max(k, k + ad), grp});
       if ((ot === "C" || ot === "P") && (sd === "long" || sd === "short")) {
         const dir = ot === "C" ? 1 : -1, rgb = sd === "long" ? PB_BUY : PB_SELL;
         for (let i = 0; i < PB_AREA_STEPS; i++) {
@@ -357,21 +379,226 @@ async function renderPriceBoxes(){
           showarrow: false, text: fmtCoin(lv.total, d.coin), font: {color: "#f39c33", size: 10}});
     });
   }
+  // "now" = the dotted line (server time); build 9 rev 2: a hover label along it (date and time, UTC
+  // and the browser's local time) and it moves on every minute
+  const nowMs = Date.parse(d.now);
+  PB.nowSkew = nowMs - Date.now();             // server clock vs this browser
+  PB.nowShape = shapes.length;
   shapes.push({type: "line", xref: "x", x0: plotT(d.now), x1: plotT(d.now), yref: "paper", y0: 0, y1: 1,
     line: {color: "#8b93a1", width: 1, dash: "dot"}});
+  PB.nowTraces = [traces.length];
+  traces.push(pbNowTrace(nowMs, "y3", Array.from({length: 41}, (_, i) => i / 40)));
+  const exMax = Math.max(0, ...ex.map(sg => sg.total));
+  if (ex.length && exMax > 0) {
+    PB.nowTraces.push(traces.length);
+    traces.push(pbNowTrace(nowMs, "y2", Array.from({length: 9}, (_, i) => exMax * i / 8)));
+  }
   if (last) ann.push({xref: "paper", x: 1, y: last.close, yref: "y", xanchor: "left", showarrow: false,
     text: fmtPx(last.close), font: {color: "#fff", size: 11}, borderpad: 3,
     bgcolor: (lastC && lastC.c < lastC.o) ? "#ef5350" : "#26a69a"});
 
-  Plotly.newPlot("c-pricebox", traces, layout({
+  // build 9: prices start fitted to the period (the same rule the navigation keeps using);
+  // the lower strip has a fixed scale; the wheel / drags are ChartNav's (static/chartnav.js)
+  const y0 = pbFit(PB.home[0], PB.home[1], true);
+  const gd = document.getElementById("c-pricebox");
+  // build 9 rev 2: date ticks twice as dense as Plotly's own choice (re-picked on every view change)
+  const tk = pbTicks(PB.home[0], PB.home[1], (gd.clientWidth || 1200) - 16 - 78);
+  PB.dtick = tk.dtick;
+  await Plotly.newPlot(gd, traces, layout({
     xaxis: {type: "date", range: [plotT(d.range[0]), plotT(d.range[1])], rangeslider: {visible: false},
-            anchor: "y2"},
-    yaxis: {domain: [0.2, 1], side: "right", tickformat: ",.0f"},
-    yaxis2: {domain: [0, 0.15], side: "right", rangemode: "tozero", tickformat: ".2~f",
+            anchor: "y2", ...tk},
+    yaxis: {domain: [0.2, 1], side: "right", tickformat: ",.0f", ...(y0 ? {range: y0} : {})},
+    yaxis2: {domain: [0, 0.15], side: "right", rangemode: "tozero", tickformat: ".2~f", fixedrange: true,
              title: {text: d.coin || ""}, gridcolor: "#232833", zerolinecolor: "#333"},
+    // hidden 0…1 scale over the price area: only for the hover points along the "now" line
+    yaxis3: {overlaying: "y", range: [0, 1], visible: false, fixedrange: true},
     shapes, annotations: ann, legend: {orientation: "h", y: 1.07, x: 0},
     margin: {l: 16, r: 78, t: 26, b: 30}, hovermode: "closest", hoverlabel: {align: "left"},
-  }), CFG);
+    dragmode: "pan",
+  }), {...CFG, scrollZoom: false, doubleClick: false});
+  if (gen !== PB.gen) return;                  // a newer render took over
+  ChartNav.attach(gd).reset({
+    home: () => PB.home, fitY: pbFit, extra: pbExtra, onView: pbOnView, limits: pbLimits});
+  gd.on("plotly_afterplot", pbRetick);         // a resize changes the axis length → maybe the step
+  PB.nowTimer = setInterval(pbMoveNow, 60e3);
+}
+
+// --- ① navigation (build 9): fit, labels and more candles while you move ------------------------
+// ChartNav (static/chartnav.js) does the mouse / trackpad part; this is what graph ① adds to it.
+const PB = {gen: 0, cd: {t: [], x: [], o: [], h: [], l: [], c: []}};
+const BAR_MS = {"1h": 36e5, "4h": 144e5, "1d": 864e5};
+const PB_VIEW_BARS = 2000;      // zooming out stops at this many candles on screen
+const PB_KEEP = 6000;           // candles kept in the chart at most (far ones are dropped)
+const msPlot = ms => new Date(ms).toISOString().slice(0, 23).replace("T", " ");   // UTC-naive
+const pbBarText = (bar, auto) => `${String(bar).toUpperCase()} candles${auto ? " (auto)" : ""}`;
+function pbAutoBar(span){                      // same rule as the server (AUTO_BAR_MAX_DAYS)
+  for (const r of PB.autoBars) if (span / 864e5 <= r.max_days) return r.bar;
+  return "1d";
+}
+function pbSetCandles(list){
+  list.sort((a, b) => a.t - b.t);
+  PB.candles = list;
+  PB.cd = {t: list.map(c => c.t), x: list.map(c => msPlot(c.t)), o: list.map(c => c.o),
+           h: list.map(c => c.h), l: list.map(c => c.l), c: list.map(c => c.c)};
+}
+function pbLower(a, x){ let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < x) lo = m + 1; else hi = m; } return lo; }
+// Price range for a time window: candles on screen + leg / box levels drawn there (boxes hidden
+// in the legend don't count), 5% padding.
+function pbFit(t0, t1, ignoreHidden){
+  let lo = Infinity, hi = -Infinity;
+  const C = PB.cd, st = BAR_MS[PB.bar] || 0;
+  for (let i = pbLower(C.t, t0 - st); i < C.t.length && C.t[i] < t1; i++) {
+    if (C.t[i] + st <= t0) continue;
+    if (C.l[i] < lo) lo = C.l[i];
+    if (C.h[i] > hi) hi = C.h[i];
+  }
+  const gd = document.getElementById("c-pricebox");
+  const hidden = ignoreHidden ? new Set()
+    : new Set((gd.data || []).filter(t => t.visible === "legendonly").map(t => t.legendgroup));
+  for (const sp of PB.spans) {
+    if (sp.t1 < t0 || sp.t0 > t1 || hidden.has(sp.grp) || sp.lo == null) continue;
+    if (sp.lo < lo) lo = sp.lo;
+    if (sp.hi > hi) hi = sp.hi;
+  }
+  if (!(hi >= lo)) return null;
+  const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.01 || 1;
+  return [lo - pad, hi + pad];
+}
+// Box labels stay at the left edge of the view while the box is cut by it; the date ticks follow
+// the zoom (twice Plotly's density).
+function pbExtra(t0, t1){
+  const upd = {};
+  const xa = (document.getElementById("c-pricebox")._fullLayout || {}).xaxis;
+  if (xa && t1 > t0) {
+    const tk = pbTicks(t0, t1, xa._length);
+    if (tk.dtick !== PB.dtick) { PB.dtick = tk.dtick; upd["xaxis.dtick"] = tk.dtick; upd["xaxis.tick0"] = tk.tick0; }
+  }
+  for (const lb of PB.labels) {
+    const x = lb.t0 < t0 && lb.t1 > t0 ? t0 : lb.t0;
+    if (x !== lb.x) { lb.x = x; upd[`annotations[${lb.i}].x`] = msPlot(x); }
+  }
+  return upd;
+}
+function pbLimits(){
+  const auto = PB.barSel === "auto", st = BAR_MS[auto ? "1h" : PB.barSel];
+  const homeSpan = PB.home[1] - PB.home[0];
+  return {minSpan: 6 * st, maxSpan: Math.max(PB_VIEW_BARS * (auto ? BAR_MS["1d"] : st), homeSpan * 1.5)};
+}
+// --- ① date ticks and the "now" line (build 9 rev 2) ---------------------------------------------
+// Ticks: Plotly picks about one date tick per 80 px (at most 10) from a list of round steps; graph ①
+// uses the round step closest to half of that, so twice as many ticks (3 days instead of 7 for a
+// month, 12 hours instead of a day for a week).
+const T_MIN = 6e4, T_HOUR = 36e5, T_DAY = 864e5, T_MONTH = 365.25 / 12 * T_DAY, T_YEAR = 365.25 * T_DAY;
+const PB_TICK_LADDER = [1, 2, 5, 10, 15, 30].map(m => m * T_MIN)
+  .concat([1, 2, 3, 6, 12].map(h => h * T_HOUR), [1, 2, 3, 7, 14].map(dd => dd * T_DAY),
+          [1, 2, 3, 6, 12, 24, 60, 120].map(m => m * T_MONTH));
+function pbPlotlyStep(span, len){              // Plotly's own pick (axes.autoTicks, date axis)
+  const nt = Math.min(Math.max(len / 80, 4), 9) + 1, rough = span / nt, r2 = 2 * rough;
+  const up = (v, set) => set.find(x => x > v) ?? set[set.length - 1];
+  if (r2 > T_YEAR) {
+    const y = rough / T_YEAR, b = Math.pow(10, Math.floor(Math.log10(y)));
+    return up(y / b, [2, 5, 10]) * b * T_YEAR;
+  }
+  if (r2 > T_MONTH) return up(rough / T_MONTH, [1, 2, 3, 6, 12]) * T_MONTH;
+  if (r2 > T_DAY) return up(rough / T_DAY, [1, 2, 3, 7, 14]) * T_DAY;
+  if (r2 > T_HOUR) return up(rough / T_HOUR, [1, 2, 3, 6, 12]) * T_HOUR;
+  return up(rough / T_MIN, [1, 2, 5, 10, 15, 30]) * T_MIN;
+}
+function pbTicks(t0, t1, len){
+  const want = pbPlotlyStep(t1 - t0, Math.max(len || 0, 1)) / 2;
+  let best = PB_TICK_LADDER[0];
+  for (const st of PB_TICK_LADDER)
+    if (Math.abs(Math.log(st / want)) < Math.abs(Math.log(best / want)) - 1e-9) best = st;
+  if (best >= T_MONTH * 0.99) return {dtick: "M" + Math.round(best / T_MONTH), tick0: "2000-01-01"};
+  return {dtick: best, tick0: best >= T_DAY ? "2000-01-02" : "2000-01-01"};   // days: from a Sunday
+}
+function pbRetick(){                            // after a resize: same view, new axis length
+  const gd = document.getElementById("c-pricebox"), xa = (gd._fullLayout || {}).xaxis;
+  if (!xa || !xa._length) return;
+  const tk = pbTicks(xa.r2l(xa.range[0]), xa.r2l(xa.range[1]), xa._length);
+  if (tk.dtick !== PB.dtick) { PB.dtick = tk.dtick; Plotly.relayout(gd, {"xaxis.dtick": tk.dtick, "xaxis.tick0": tk.tick0}); }
+}
+// "now": hover text and the invisible points along the dotted line that carry it
+function pbNowText(ms){
+  const t = new Date(ms), p = n => String(n).padStart(2, "0"), off = -t.getTimezoneOffset();
+  const local = `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}`;
+  const tz = "UTC" + (off < 0 ? "−" : "+") + Math.floor(Math.abs(off) / 60) + (Math.abs(off) % 60 ? ":" + p(Math.abs(off) % 60) : "");
+  return `<b>Now</b><br>${fmtUtc(t.toISOString())}<br>${local} your time (${tz})`;
+}
+function pbNowTrace(ms, yaxis, ys){
+  return {type: "scatter", mode: "markers", name: "now", showlegend: false, xaxis: "x", yaxis,
+    x: ys.map(() => msPlot(ms)), y: ys, marker: {size: 8, color: "rgba(0,0,0,0)"},
+    hoverinfo: "text", text: pbNowText(ms), hoverlabel: pbLabel("#8b93a1")};
+}
+function pbMoveNow(){                           // every minute: the line and its label move on
+  const gd = document.getElementById("c-pricebox");
+  if (PB.nowShape == null || !gd._fullLayout || !gd.data) return;
+  const ms = Date.now() + PB.nowSkew, x = msPlot(ms);
+  Plotly.relayout(gd, {[`shapes[${PB.nowShape}].x0`]: x, [`shapes[${PB.nowShape}].x1`]: x});
+  Plotly.restyle(gd, {x: PB.nowTraces.map(i => gd.data[i].x.map(() => x)),
+                      text: PB.nowTraces.map(() => pbNowText(ms))}, PB.nowTraces);
+}
+
+// What to load for a view: another candle size (Auto, debounced) or the side that runs out.
+function pbPlan(v0, v1){
+  if (!PB.cex) return null;
+  const span = v1 - v0, bar = PB.barSel === "auto" ? pbAutoBar(span) : PB.barSel;
+  const w0 = v0 - span / 2, w1 = v1 + span / 2;
+  if (bar !== PB.bar) return {bar, from: w0, to: w1, mode: "replace", urgent: false};
+  const [c0, c1] = PB.cover, m = span / 4;
+  const needL = v0 - m < c0 && c0 > PB.lo, needR = v1 + m > c1 && c1 < PB.hi;
+  if (!needL && !needR) return null;
+  const urgent = (needL && v0 < c0) || (needR && v1 > c1);          // blank part on screen
+  if ((needL && needR) || v1 < c0 || v0 > c1) return {bar, from: w0, to: w1, mode: "replace", urgent};
+  return needL ? {bar, from: w0, to: c0, mode: "left", urgent} : {bar, from: c1, to: w1, mode: "right", urgent};
+}
+function pbOnView(v0, v1){
+  PB.view = [v0, v1];
+  clearTimeout(PB.loadT);
+  if (PB.busy) return;                         // checked again when the load is done
+  const p = pbPlan(v0, v1);
+  if (!p) return;
+  if (p.urgent) pbLoad(p);                     // while dragging: load now
+  else PB.loadT = setTimeout(() => {           // new candle size / read-ahead: when the zoom rests
+    const q = !PB.busy && PB.view ? pbPlan(PB.view[0], PB.view[1]) : null;
+    if (q) pbLoad(q);
+  }, 220);
+}
+async function pbLoad(p){
+  const gen = PB.gen;
+  PB.busy = true;
+  let r = null;
+  try {
+    r = await api("/price-candles", {underlying: PB.ul, subaccount: state.subaccount, bar: p.bar,
+      start: new Date(p.from).toISOString(), end: new Date(p.to).toISOString()});
+  } catch (e) { console.warn("price-candles", e); }
+  if (gen !== PB.gen) return;                  // filters changed meanwhile: a new render owns PB
+  PB.busy = false;
+  if (!r) return;
+  const step = BAR_MS[r.bar], s0 = Date.parse(r.start), s1 = Date.parse(r.end);
+  const fresh = r.candles.map(c => ({t: Date.parse(c.t), o: c.o, h: c.h, l: c.l, c: c.c}));
+  let list;
+  if (p.mode === "replace" || r.bar !== PB.bar) { list = fresh; PB.cover = [s0, s1]; }
+  else {
+    const byT = new Map(PB.candles.map(c => [c.t, c]));
+    for (const c of fresh) byT.set(c.t, c);
+    list = [...byT.values()];
+    PB.cover = [Math.min(PB.cover[0], s0), Math.max(PB.cover[1], s1)];
+  }
+  PB.bar = r.bar;
+  PB.lo = r.available[0] ? Date.parse(r.available[0]) : Infinity;
+  PB.hi = r.available[1] ? Math.min(Date.parse(r.available[1]) + step, PB.now) : -Infinity;
+  if (list.length > PB_KEEP && PB.view) {      // keep the ones around the view
+    const sp = PB.view[1] - PB.view[0], a = PB.view[0] - 1.5 * sp, b = PB.view[1] + 1.5 * sp;
+    list = list.filter(c => c.t >= a - step && c.t < b);
+    PB.cover = [Math.max(PB.cover[0], a), Math.min(PB.cover[1], b)];
+  }
+  pbSetCandles(list);
+  const span = document.getElementById("pb-bar-now");
+  if (span) span.textContent = pbBarText(PB.bar, PB.barSel === "auto");
+  await Plotly.restyle("c-pricebox", {x: [PB.cd.x], open: [PB.cd.o], high: [PB.cd.h], low: [PB.cd.l],
+                                      close: [PB.cd.c]}, [0]);
+  if (gen === PB.gen && PB.view) pbOnView(PB.view[0], PB.view[1]);   // the view may have moved on
 }
 
 async function renderEquity() {

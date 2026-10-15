@@ -321,6 +321,30 @@ pm2 restart web worker            # new Settings tab; worker skips boxes switche
   before the strike / expiry; on/off; critical; note). One row per asset + notification; the asset list is the same as the Dashboard's
   Underlying list (underlyings with positions in the accounts).
 
+### 10h. Graph ① navigation like TradingView (build 9, no migration)
+
+```bash
+pm2 restart web                   # new static/chartnav.js + GET /api/price-candles
+```
+
+Then reload the Dashboard.
+
+- **Move:** drag the chart. Dragging up / down also moves the prices (the **A** button under the price
+  scale goes dark = prices no longer fit themselves).
+- **Zoom:** click into the chart first (blue outline), then the wheel zooms **time** at the cursor and
+  the prices fit. Before that click the wheel scrolls the page; Esc or a click outside releases it.
+  On the price scale (right) the wheel or a drag up / down zooms **prices**; on the date scale (bottom)
+  a drag left / right zooms **time**.
+- **Mac trackpad:** two fingers left / right = move, up / down = zoom, pinch = zoom.
+- **Back:** double-click the chart or **⟲** = the reporting period; double-click the price scale or
+  **A** = prices fit again. **?** lists all gestures.
+- **More data:** candles before / after the reporting period load as you move; with *Candles = Auto*
+  the size switches 1H ↔ 4H ↔ 1D with the zoom (≤ 14 days 1H, ≤ 90 days 4H). Boxes stay those of the
+  reporting period.
+- **Rev 2:** the date axis has twice as many ticks (e.g. every 3 days for a month), re-picked as you
+  zoom. The dotted vertical line is **now** — hover it for the date and time (UTC and your local time);
+  it moves on every minute.
+
 ---
 
 ## Running everything as services (pm2)

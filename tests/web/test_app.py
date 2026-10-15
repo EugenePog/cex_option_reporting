@@ -55,6 +55,12 @@ def test_price_boxes_requires_auth():
     assert r.status_code == 401
 
 
+def test_price_candles_requires_auth():
+    # build 9: more candles for graph ① while it is dragged / zoomed
+    r = client.get("/api/price-candles", params={"start": "2026-09-01", "end": "2026-09-02"})
+    assert r.status_code == 401
+
+
 def test_settings_redirects_when_anonymous():
     r = client.get("/settings", follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == "/login"

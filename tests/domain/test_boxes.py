@@ -96,6 +96,16 @@ def test_auto_bar():
     assert auto_bar(T0, T0 + timedelta(days=200)) == "1d"
 
 
+def test_auto_bar_edges_follow_the_shared_rule():
+    # build 9: the same thresholds go to the browser (graph ① switches candles with its zoom)
+    from app.domain.boxes import AUTO_BAR_MAX_DAYS
+    assert AUTO_BAR_MAX_DAYS == (("1h", 14), ("4h", 90))
+    assert auto_bar(T0, T0 + timedelta(days=14)) == "1h"
+    assert auto_bar(T0, T0 + timedelta(days=14, minutes=1)) == "4h"
+    assert auto_bar(T0, T0 + timedelta(days=90)) == "4h"
+    assert auto_bar(T0, T0 + timedelta(days=90, minutes=1)) == "1d"
+
+
 def test_closed_early():
     from app.domain.boxes import closed_early
     early = leg(1, 1, h(0), h(24), closed=h(5))

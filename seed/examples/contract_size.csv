@@ -1,0 +1,4 @@
+cex_code,inst_type,underlying,ct_val,ct_val_ccy,note
+OKX,OPTION,BTC-USD,0.01,BTC,OKX BTC-USD options: 1 contract = 0.01 BTC
+OKX,OPTION,ETH-USD,0.1,ETH,OKX ETH-USD options: 1 contract = 0.1 ETH
+OKX,OPTION,SOL-USD,1,SOL,OKX SOL-USD options: 1 contract = 1 SOL

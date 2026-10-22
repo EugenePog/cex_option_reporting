@@ -248,8 +248,8 @@ your `.env` sets `SNAPSHOT_TIMES_UTC` / `INGEST_TIME_UTC`, it overrides the defa
 (or delete the lines) and `pm2 restart collector-snapshot collector-history`.
 
 Contract sizes now live in `core.contract_size` (one row per exchange / instrument type / underlying).
-To change or add one, edit `seed/contract_size.csv` and run `python -m app.cli seed --table contract_size`,
-then `make pipeline`.
+To change or add one, edit `seed/common/contract_size.csv` (build 11: was `seed/contract_size.csv`) and
+run `python -m app.cli seed --table contract_size`, then `make pipeline`.
 
 ```bash
 docker exec -it cex_pg psql -U cex -d cex_option_reporting \
@@ -302,8 +302,8 @@ docker exec -it cex_pg psql -U cex -d cex_option_reporting \
   -c "select * from core.notification_state order by last_sent_at desc nulls last limit 20;"
 ```
 
-Keep `seed/notification_setting.csv` in step if you change values in the DB — `make seed` writes the
-CSV values back.
+Keep `seed/common/notification_setting.csv` (build 11: was `seed/notification_setting.csv`) in step if
+you change values in the DB — `make seed` writes the CSV values back.
 
 ### 10g. Per-box switch + Settings tab (migration 0023)
 
@@ -348,6 +348,30 @@ Then reload the Dashboard.
   left). With **Sync timelines** on (default) the two charts move together; one click gives the wheel
   to both. Days outside the reporting period load as you move. The **A ⟲ ?** buttons appear in the
   corner under the value scale while the mouse is over the chart. Both graphs now show times in UTC.
+
+### 10i. Seeds per environment, matched on keys (build 11, migration 0024)
+
+```bash
+make migrate          # 0024: strategy.key + unique keys for the seeded core tables
+make seed             # seed/common + seed/dev (APP_ENV, default dev) — matched on keys, no ids
+pm2 restart web       # the Box builder shows each box's seed key
+```
+
+- **Folders:** `seed/common/` (contract sizes, Telegram notification settings — every environment),
+  `seed/dev/`, `seed/test/`, `seed/prod/` (users, accounts, sub-accounts, boxes, rules). `APP_ENV` in
+  `.env` picks the environment (`dev` | `test` | `prod`, default `dev`); `make seed ENV=test` for
+  another one once. `seed/prod/` is empty for now. `seed/examples/` holds templates (not loaded).
+- **No ids in the CSVs:** rows are matched on their keys — user e-mail, account `cex_code` + `label`,
+  sub-account (account + `subacct_name`), box (sub-account + `key`), rule (sub-account + box +
+  `match_json`), contract size, notification (asset + code). Parents are named by key
+  (`user_email`, `cex_code` + `account_label` + `subacct_name`, `strategy_key`). The database assigns
+  ids, so boxes made in the Box builder and rows added in Settings never clash with the seed.
+- **First seed after the upgrade:** every existing row is matched — the output should say
+  `0 new` for each table. Rows only in the database (e.g. boxes from the Box builder) stay as they are.
+- If `make migrate` stops with *"these rows would break the new unique keys"*, merge or delete the
+  listed duplicates (same account label twice, same sub-account twice, same rule twice) and run it
+  again — nothing was changed.
+- Full format and rules: `seed/README.md`.
 
 ---
 

@@ -205,3 +205,6 @@ table.bb-rv td{white-space:nowrap}
 .bb-toast{position:fixed;left:50%;transform:translateX(-50%);bottom:76px;z-index:60;background:#1b2028;border:1px solid #333b47;color:var(--text);
   border-radius:9px;padding:9px 14px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.5)}
 .bb-toast.ok{border-color:#1c4a2b} .bb-toast.bad{border-color:#5b1e22;color:#f7a6a6}
+/* build 11: the box's seed key in the Edit box dialog */
+.bb-key{color:#8b93a1;font-size:12px}
+.bb-key code{color:#c7cdd6}

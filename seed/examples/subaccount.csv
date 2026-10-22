@@ -1,0 +1,6 @@
+cex_code,account_label,subacct_name,display_name,is_active
+OKX,OKX_K,,Straddle sell,true
+OKX,OKX_M_HEDGE,,Hedge,true
+OKX,OKX_E,,Main,true
+OKX,OKX_M_BOX,,Box_management_1,true
+OKX,OKX_K_BOX,,Box management half-prod,true

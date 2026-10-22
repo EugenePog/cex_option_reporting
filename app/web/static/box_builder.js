@@ -515,9 +515,12 @@ function openStratDlg(st) {
   NS = {id: st ? st.id : null, armed: false};
   const acct = esc((S.subs.find(s => s.id === S.sub) || {}).label || "");
   $("ns-title").textContent = st ? "Edit box" : "New box";
+  // build 11: the seed files name a box by its key (fixed when it is created, kept on renames)
   $("ns-sub").innerHTML = st
-    ? `Box in <b>${acct}</b>. Renaming keeps every leg, pin and rule; reports show the new name right away.`
-    : `Creates a box in <b>${acct}</b>. It lives in the database — add it to <code>seed/strategy.csv</code> to keep it in git.`;
+    ? `Box in <b>${acct}</b>. Renaming keeps every leg, pin and rule; reports show the new name right away.` +
+      `<br><span class="bb-key">Seed key: <code>${esc(st.key || "")}</code> — stays when you rename</span>`
+    : `Creates a box in <b>${acct}</b>. It lives in the database — to keep it in git, add a row to ` +
+      `<code>seed/&lt;env&gt;/strategy.csv</code> with this account and its key (= the name you give it now).`;
   $("ns-name").value = st ? st.name : "";
   $("ns-color").value = st && /^#[0-9a-f]{6}$/i.test(st.color || "") ? st.color : "#9b7be0";
   $("ns-desc").value = st ? (st.description || "") : "";

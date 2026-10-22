@@ -150,6 +150,20 @@ def _name_taken(s, sub_id: int, name: str, except_id: int | None = None) -> bool
     return s.execute(q).first() is not None
 
 
+def _free_key(s, sub_id: int, base: str, except_id: int | None = None) -> str:
+    """build 11: a seed key no other active box of the account has — `base`, else base-2, base-3 …
+    (a renamed box keeps its old key, so a new box's name may already be someone's key)."""
+    q = select(Strategy.key).where(Strategy.subaccount_id == sub_id, Strategy.deleted_at.is_(None))
+    if except_id is not None:
+        q = q.where(Strategy.id != except_id)
+    taken = {k.lower() for (k,) in s.execute(q) if k}
+    key, i = base[:64], 2
+    while key.lower() in taken:
+        sfx = f"-{i}"
+        key, i = base[:64 - len(sfx)] + sfx, i + 1
+    return key
+
+
 def _current_links(s, sub_id: int) -> dict[tuple, StrategyLink]:
     rows = s.execute(select(StrategyLink).where(StrategyLink.subaccount_id == sub_id,
                                                 StrategyLink.superseded_at.is_(None))).scalars()
@@ -237,7 +251,7 @@ def _strategy_rows(s, sub_id: int, legs: list[dict]) -> list[dict]:
              "upl_usd": 0.0, "win_rate": None}
     out = []
     for st in _strategies(s, sub_id):
-        out.append({"id": st.id, "name": st.name, "color": st.color or "#888888",
+        out.append({"id": st.id, "name": st.name, "key": st.key, "color": st.color or "#888888",
                     "description": st.description, "is_unassigned": st.name == "unassigned",
                     "send_notifications": bool(st.send_notifications),
                     "rules": rules.get(st.id, []), **stats.get(st.id, empty)})
@@ -621,6 +635,8 @@ def undo(body: UndoIn, user: CurrentUser = Depends(require_admin)) -> dict:
             # undo of "box deleted": bring the box (and so its rules) back before re-pinning legs
             if _name_taken(s, sub_id, box.name):
                 box.name = (box.name[:53] + " (restored)")
+            # build 11: its seed key may have been reused by a new box meanwhile
+            box.key = _free_key(s, sub_id, box.key, except_id=box.id)
             box.deleted_at = box.deleted_by = box.deleted_changeset_id = None
             restored = box.name
             s.flush()
@@ -672,8 +688,9 @@ def undo(body: UndoIn, user: CurrentUser = Depends(require_admin)) -> dict:
 
 @router.post("/strategies")
 def create_strategy(body: StrategyIn, user: CurrentUser = Depends(require_admin)) -> dict:
-    """Create a strategy ("box" in the GUI) in the account. Lives in the DB only — add it to
-    seed/strategy.csv to keep it in git."""
+    """Create a strategy ("box" in the GUI) in the account. Lives in the DB only — add a row to
+    seed/<env>/strategy.csv (account + its key) to keep it in git. build 11: its seed key = the
+    name (made unique in the account), fixed from now on."""
     _check_sub(user, body.subaccount_id)
     name = _valid_name(body.name)
     color = body.color if body.color and _HEX.match(body.color) else "#9b7be0"
@@ -681,14 +698,15 @@ def create_strategy(body: StrategyIn, user: CurrentUser = Depends(require_admin)
         if _name_taken(s, body.subaccount_id, name):
             raise HTTPException(409, f"Box '{name}' already exists in this account")
         st = Strategy(subaccount_id=body.subaccount_id, name=name, color=color,
+                      key=_free_key(s, body.subaccount_id, name),
                       description=(body.description or "").strip() or None,
                       send_notifications=body.send_notifications)
         s.add(st)
         s.flush()
         _audit(s, user.id, "box_builder.create_strategy",
-               f"strategy={st.id} subaccount={body.subaccount_id} name={name} "
+               f"strategy={st.id} subaccount={body.subaccount_id} name={name} key={st.key} "
                f"notify={'on' if st.send_notifications else 'off'}")
-        return {"id": st.id, "name": st.name, "color": st.color,
+        return {"id": st.id, "name": st.name, "key": st.key, "color": st.color,
                 "send_notifications": st.send_notifications}
 
 

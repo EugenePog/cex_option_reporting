@@ -51,7 +51,11 @@ class CoreUser(Base):
 
 class CexAccount(Base):
     __tablename__ = "cex_account"
-    __table_args__ = {"schema": CORE}
+    __table_args__ = (
+        # build 11 (0024): the seed files name an account by exchange + label
+        UniqueConstraint("cex_code", "label", name="uq_cex_account_label"),
+        {"schema": CORE},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.user.id"))
@@ -67,7 +71,11 @@ class CexAccount(Base):
 
 class Subaccount(Base):
     __tablename__ = "subaccount"
-    __table_args__ = {"schema": CORE}
+    __table_args__ = (
+        # build 11 (0024): the seed files name a sub-account by its account + sub-account name
+        UniqueConstraint("cex_account_id", "subacct_name", name="uq_subaccount_name"),
+        {"schema": CORE},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     cex_account_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.cex_account.id"))
@@ -77,10 +85,19 @@ class Subaccount(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+def _key_from_name(ctx) -> str | None:
+    """Default for strategy.key: the box name it is created with."""
+    return ctx.get_current_parameters().get("name")
+
+
 class Strategy(Base):
     """A strategy — shown as a *box* in the admin Box builder.
 
     `send_notifications` (0023) switches the box's Telegram alerts on / off.
+
+    `key` (0024, build 11) is the box's fixed name for the seed files: set from the name when the
+    box is created and never changed by a rename; unique per sub-account among boxes that are not
+    deleted. The seed loader matches strategy rows (and the boxes named in strategy_rule.csv) on it.
 
     Deleting a box is a soft delete (`deleted_at`, 0018): its legs are pinned to the account's
     `unassigned` box in changeset `deleted_changeset_id`, its strategy_rule rows stop applying, and
@@ -93,12 +110,18 @@ class Strategy(Base):
     __table_args__ = (
         # target of strategy_link's composite FK (strategy must belong to the leg's subaccount)
         UniqueConstraint("id", "subaccount_id", name="uq_strategy_id_subaccount"),
+        # build 11 (0024): one active box per key in a sub-account (deleted boxes keep theirs)
+        Index("uq_strategy_key_active", "subaccount_id", "key", unique=True,
+              postgresql_where=text("deleted_at IS NULL")),
         {"schema": CORE},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     subaccount_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.subaccount.id"))
     name: Mapped[str] = mapped_column(String(64))
+    # build 11 (0024): fixed seed key — defaults to the name at creation (the Box builder makes it
+    # unique in the account), not changed by renames
+    key: Mapped[str] = mapped_column(String(64), default=_key_from_name)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     color: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -116,7 +139,12 @@ class Strategy(Base):
 
 class StrategyRule(Base):
     __tablename__ = "strategy_rule"
-    __table_args__ = {"schema": CORE}
+    __table_args__ = (
+        # build 11 (0024): the seed files identify a rule by account + box + condition
+        UniqueConstraint("subaccount_id", "strategy_id", "match_json",
+                         name="uq_strategy_rule_match"),
+        {"schema": CORE},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     subaccount_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.subaccount.id"))

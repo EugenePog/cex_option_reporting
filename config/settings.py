@@ -12,6 +12,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # Environment (build 11): picks the seed folder seed/<APP_ENV> loaded on top of seed/common
+    # by `make seed` — dev | test | prod (any folder name under seed/ works)
+    app_env: str = Field(default="dev", alias="APP_ENV")
+
     # Database
     database_url: str = Field(
         default="postgresql+psycopg://cex:cex@localhost:5432/cex_option_reporting",

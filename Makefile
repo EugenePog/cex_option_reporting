@@ -21,8 +21,8 @@ revision:  ## Create a new migration: make revision m="message"
 init-db:  ## Create schemas + tables from ORM metadata (dev; or use `make migrate`)
 	python -m app.cli init-db
 
-seed:  ## Load core/settings CSVs from seed/ into the DB (upsert by id)
-	python -m app.cli seed
+seed:  ## Load seed/common + seed/<APP_ENV> (default dev; make seed ENV=test) into core, matched on keys
+	python -m app.cli seed $(if $(ENV),--env $(ENV),)
 
 collect-snapshot-loop:  ## Snapshot scheduler (balance/positions/margin/greeks + BTC-USD 1m index candles) — SNAPSHOT_TIMES_UTC, default hourly
 	python -m app.cli snapshot --loop

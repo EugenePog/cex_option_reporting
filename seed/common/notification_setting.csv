@@ -1,0 +1,7 @@
+asset,code,threshold,is_enabled,is_critical,note
+BTC-USD,top_strike,0,true,true,a: price reaches the top strike of a box
+BTC-USD,bottom_strike,0,true,true,b: price reaches the bottom strike of a box
+BTC-USD,near_top_pct,2,true,false,c: price reaches top strike - X % (X = threshold)
+BTC-USD,near_bottom_pct,2,true,false,d: price reaches bottom strike + Y % (Y = threshold)
+BTC-USD,last_expiry,0,true,true,e: time reaches the last expiry of a box
+BTC-USD,last_expiry_days,1,true,false,f: time reaches last expiry - N days (N = threshold)

@@ -32,26 +32,34 @@ def init_db() -> None:
 
 @app.command()
 def seed(
-    folder: str = typer.Option("seed", help="Folder holding <table>.csv files."),
+    env: str = typer.Option(None, help="Environment folder seed/<env> loaded on top of "
+                                       "seed/common (default: APP_ENV, else dev)."),
+    folder: str = typer.Option("seed", help="Base folder holding common/ and <env>/."),
     table: str = typer.Option(None, help="Load only this table."),
     replace: bool = typer.Option(False, help="Truncate target tables before loading."),
     wipe_links: bool = typer.Option(
         False, help="With --replace: allow deleting the Box builder's manual strategy links."),
 ) -> None:
     """Load core/settings CSVs (user, cex_account, subaccount, strategy, strategy_rule,
-    contract_size, notification_setting) into the DB."""
+    contract_size, notification_setting) into the DB — seed/common, then seed/<env>.
+    build 11: rows are matched on their natural keys (no ids in the CSVs)."""
     setup_logging()
-    from app.db.seed_loader import SeedReplaceWouldWipeLinks, load_seed
+    from app.db.seed_loader import SeedError, SeedReplaceWouldWipeLinks, load_seed
+    from config.settings import get_settings
 
+    env = env or get_settings().app_env or "dev"
+    typer.echo(f"Seeding environment '{env}' (seed/common + seed/{env})")
     try:
-        counts = load_seed(folder=folder, only=table, replace=replace, wipe_links=wipe_links)
-    except SeedReplaceWouldWipeLinks as e:
+        counts = load_seed(folder=folder, only=table, replace=replace, wipe_links=wipe_links,
+                           env=env)
+    except (SeedReplaceWouldWipeLinks, SeedError, FileNotFoundError) as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1) from e
     if not counts:
         typer.echo("No seed CSVs found.")
     for t, c in counts.items():
-        typer.echo(f"core.{t}: {c} rows")
+        typer.echo(f"core.{t}: {c['rows']} rows ({c['new']} new, {c['updated']} updated)"
+                   f" — {', '.join(c['files'])}")
 
 
 @app.command()

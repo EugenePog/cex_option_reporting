@@ -1,0 +1,2 @@
+cex_code,account_label,subacct_name,strategy_key,match_json,priority
+OKX,OKX_K,,daily-short-straddle,"{""inst_pattern"": ""BTC-USD-*""}",100

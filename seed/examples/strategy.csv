@@ -1,0 +1,9 @@
+cex_code,account_label,subacct_name,key,name,description,color
+OKX,OKX_K,,daily-short-straddle,daily-short-straddle,Daily short straddle,#4c9aff
+OKX,OKX_K,,unassigned,unassigned,Fallback bucket for unmatched positions,#888888
+OKX,OKX_M_HEDGE,,Hedge box,Hedge box,Hedge box strategy,#4c9aff
+OKX,OKX_M_HEDGE,,unassigned,unassigned,Fallback bucket for unmatched positions,#888888
+OKX,OKX_E,,holding,holding,Holding assets,#4c9aff
+OKX,OKX_E,,unassigned,unassigned,Fallback bucket for unmatched positions,#888888
+OKX,OKX_M_BOX,,unassigned,unassigned,Fallback bucket for unmatched positions,#888888
+OKX,OKX_K_BOX,,unassigned,unassigned,Fallback bucket for unmatched positions,#888888

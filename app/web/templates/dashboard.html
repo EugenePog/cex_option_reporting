@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Dashboard · CEX Option Reporting{% endblock %}
 {% block nav_dash %}active{% endblock %}
-{% block head %}<script src="/static/chartnav.js?v={{ asset_ver }}"></script>{% endblock %}
+{% block head %}<script src="/static/chartnav.js?v={{ asset_ver }}"></script>
+<script src="/static/chartfs.js?v={{ asset_ver }}"></script>{% endblock %}
 {% block body %}
 <h1 class="page">Dashboard</h1>
 <p class="sub">Open book &amp; performance across strikes and maturities.</p>
@@ -12,15 +13,15 @@
 </div>
 
 <div class="grid" style="margin-bottom:18px">
-  <div class="card">
+  <div class="card" data-fs="c-pricebox">
     <h2>① Price with strategy boxes</h2>
-    <p class="hint">Index price with every box drawn on it: each line is an option leg at its strike, from
+    <p class="hint fs-hide">Index price with every box drawn on it: each line is an option leg at its strike, from
       open time (tick) to expiry (tick) — closed early: a dot at the close, then dashed to expiry; the shaded
       side is where the leg pays off — above a call, below a put; green = bought, red = sold. The box covers
       all its legs; the label is the box's total size. Below: total open size (legs count until closed).
       Times in UTC.<br>Navigate like TradingView: drag the chart to move; click it, then use the wheel to zoom
       (trackpad: two fingers move / zoom, pinch zooms); drag or scroll the price / date scale to stretch it;
-      double-click to go back. More candles load as you move; with Candles = Auto their size follows the zoom.
+      double-click to go back. More candles load as you move.
       <b>?</b> under the price scale lists everything.</p>
     <div class="rpbar">
       <label>Reporting period</label>
@@ -34,13 +35,13 @@
       </select>
       <label>From</label><input type="date" id="from-pb">
       <label>Till</label><input type="date" id="till-pb">
-      <label>Candles</label>
+      <span class="rp-group"><label>Candles</label>
       <select id="pb-bar" style="min-width:90px">
-        <option value="auto" selected>Auto</option>
         <option value="1h">1H</option>
         <option value="4h">4H</option>
-        <option value="1d">1D</option>
+        <option value="1d" selected>1D</option>
       </select>
+      <span id="pb-bar-range" class="bar-range"></span></span>
     </div>
     <p class="hint" id="pb-meta" style="margin-top:-4px"></p>
     <div id="c-pricebox" class="chart" style="height:580px"></div>
@@ -48,7 +49,7 @@
 </div>
 
 <div class="grid" style="margin-bottom:18px">
-  <div class="card">
+  <div class="card" data-fs="c-equity c-pnl">
     <h2>② Equity curve &amp; daily net P&amp;L
       <label class="sync-toggle"><input type="checkbox" id="sync-1" checked> Sync timelines</label></h2>
     <p class="hint" id="equity-header">Account value over time · realized + unrealized per day.</p>
@@ -65,7 +66,7 @@
       <label>From</label><input type="date" id="from-1">
       <label>Till</label><input type="date" id="till-1">
     </div>
-    <p class="hint" style="margin-top:-4px">Navigate as on graph ①: drag to move; click the chart, then use the
+    <p class="hint fs-hide" style="margin-top:-4px">Navigate as on graph ①: drag to move; click the chart, then use the
       wheel to zoom (trackpad: two fingers move / zoom, pinch zooms); drag or scroll the value / date scale to
       stretch it; double-click to go back. Data outside the period loads as you move. Times in UTC.</p>
     <div id="c-equity" class="chart"></div>
@@ -74,7 +75,7 @@
 </div>
 
 <div class="grid" style="margin-bottom:18px">
-  <div class="card">
+  <div class="card" data-fs="c-asset-equity c-asset-pnl">
     <h2>②b Asset equity &amp; daily net P&amp;L (in-kind)
       <label class="sync-toggle"><input type="checkbox" id="sync-1b" checked> Sync timelines</label></h2>
     <p class="hint">Balance &amp; P&amp;L for a single asset, denominated in that asset.
@@ -93,7 +94,7 @@
       <label>From</label><input type="date" id="from-1b">
       <label>Till</label><input type="date" id="till-1b">
     </div>
-    <p class="hint" style="margin-top:-4px">Navigate as on graph ①: drag to move; click the chart, then use the
+    <p class="hint fs-hide" style="margin-top:-4px">Navigate as on graph ①: drag to move; click the chart, then use the
       wheel to zoom (trackpad: two fingers move / zoom, pinch zooms); drag or scroll the value / date scale to
       stretch it; double-click to go back. Data outside the period loads as you move. Times in UTC.</p>
     <div id="c-asset-equity" class="chart"></div>
@@ -142,7 +143,8 @@ async function boot() {
   document.getElementById("f-subaccount").onchange = e => { state.subaccount = e.target.value; renderAll(); };
   document.getElementById("f-asset").onchange = () => renderAssetEquity();
   document.getElementById("f-expiry").onchange = () => renderPayoff();
-  document.getElementById("pb-bar").onchange = () => renderPriceBoxes();
+  document.getElementById("pb-bar").onchange = () => { pbShowRange(); renderPriceBoxes(); };
+  pbShowRange();
   setupPeriod("pb", renderPriceBoxes);  // same presets / default (Last 1 month) as graph ②
   document.getElementById("sync-1").onchange = () => renderEquity();
   document.getElementById("sync-1b").onchange = () => renderAssetEquity();
@@ -438,6 +440,20 @@ const BAR_MS = {"1h": 36e5, "4h": 144e5, "1d": 864e5};
 const PB_VIEW_BARS = 2000;      // zooming out stops at this many candles on screen
 const PB_KEEP = 6000;           // candles kept in the chart at most (far ones are dropped)
 const msPlot = ms => new Date(ms).toISOString().slice(0, 23).replace("T", " ");   // UTC-naive
+// Candles combobox: the UTC window each candle covers (fixed UTC boundaries, see gold.index_candle)
+const PB_BAR_RANGES = {
+  "1h": ["HH:00–HH:59"],
+  "4h": ["00:00–03:59", "04:00–07:59", "08:00–11:59", "12:00–15:59", "16:00–19:59", "20:00–23:59"],
+  "1d": ["00:00–23:59"],
+};
+function pbShowRange(){
+  const bar = document.getElementById("pb-bar").value, el = document.getElementById("pb-bar-range");
+  const r = PB_BAR_RANGES[bar] || [];
+  el.innerHTML = r.length > 1                  // 4H: six windows as a compact 3 × 2 grid, UTC once
+    ? `<span class="br-grid">${r.map(x => `<span>${x}</span>`).join("")}</span><span>UTC</span>`
+    : `<span>${r[0] || ""} UTC</span>`;
+  el.title = `Each ${bar.toUpperCase()} candle covers ${r.map(x => x + " UTC").join(", ")}`;
+}
 const pbBarText = (bar, auto) => `${String(bar).toUpperCase()} candles${auto ? " (auto)" : ""}`;
 function pbAutoBar(span){                      // same rule as the server (AUTO_BAR_MAX_DAYS)
   for (const r of PB.autoBars) if (span / 864e5 <= r.max_days) return r.bar;

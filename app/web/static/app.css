@@ -65,3 +65,26 @@ tbody tr:hover{background:var(--panel2);cursor:pointer}
 .err{background:#2a1113;border:1px solid #5b1e22;color:#f7a6a6;border-radius:8px;
   padding:9px 12px;font-size:13px;margin-bottom:14px}
 .muted{color:var(--muted)}
+
+/* Full-screen chart cards (static/chartfs.js) — OKX-style corner button */
+.fs-btn{margin-left:auto;display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:28px;height:28px;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;
+  color:var(--muted);cursor:pointer;transition:color .15s,background .15s,border-color .15s}
+.fs-btn:hover{color:var(--text);background:var(--panel2);border-color:#3a414c}
+.fs-btn:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+.fs-btn svg{display:block}
+.card.fs-abs{position:relative}
+.card.fs-abs>.fs-btn{position:absolute;top:12px;right:14px}
+.card.fs-on{border:0;border-radius:0;overflow:auto;padding:14px 20px}
+.card.fs-on .fs-hide{display:none}
+.card.fs-on .fs-btn{color:var(--text);background:var(--panel2);border-color:#3a414c}
+.card.fs-pseudo{position:fixed;inset:0;z-index:1000;margin:0;box-sizing:border-box}
+.card:fullscreen{background:var(--panel)}
+.card::backdrop{background:var(--bg)}
+html.fs-lock,html.fs-lock body{overflow:hidden}
+
+/* Graph ① Candles combobox: UTC window of each candle (4H = compact 3 × 2 grid) */
+.bar-range{display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;
+  white-space:nowrap;font-variant-numeric:tabular-nums;cursor:default}
+.rpbar .rp-group{display:inline-flex;align-items:center;gap:14px;white-space:nowrap}
+.bar-range .br-grid{display:grid;grid-template-columns:repeat(3,auto);gap:1px 12px;font-size:11px;line-height:13px}

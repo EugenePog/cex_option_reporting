@@ -3,7 +3,15 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from app.domain.boxes import Leg, auto_bar, build_boxes, exposure_segments, line_end, open_until
+from app.domain.boxes import (
+    Leg,
+    auto_bar,
+    build_boxes,
+    exposure_segments,
+    line_end,
+    open_until,
+    size_split,
+)
 
 T0 = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
@@ -14,10 +22,11 @@ def h(n: float) -> datetime:
 
 
 def leg(i, strike, opened, expires, status="closed", closed=None, strat=1, sub=1, size=1.0,
-        coin_size=0.01, uly="BTC-USD", seen=None, pnl=None) -> Leg:
+        coin_size=0.01, uly="BTC-USD", seen=None, pnl=None, opt=None, side=None) -> Leg:
     return Leg(leg_id=i, subaccount_id=sub, strategy_id=strat, underlying=uly, strike=strike,
                opened_at=opened, expires_at=expires, status=status, closed_at=closed,
-               last_seen_at=seen, size=size, size_coin=coin_size, coin="BTC", pnl_usd=pnl)
+               last_seen_at=seen, size=size, size_coin=coin_size, coin="BTC", pnl_usd=pnl,
+               opt_type=opt, side=side)
 
 
 def test_line_runs_from_open_to_expiry_even_when_closed_early():
@@ -88,6 +97,44 @@ def test_exposure_merges_equal_neighbours_and_skips_unsized():
     segs = exposure_segments(legs, NOW)
     # the roll at 24 h is no change
     assert [(s.t0, s.t1, s.total) for s in segs] == [(h(0), h(48), 0.01)]
+
+
+def test_size_split_by_type_and_side():
+    legs = [leg(1, 70000, h(0), h(24), opt="C", side="short", coin_size=0.20),
+            leg(2, 60000, h(0), h(24), opt="P", side="short", coin_size=0.17),
+            leg(3, 75000, h(0), h(24), opt="C", side="long", coin_size=0.05),
+            leg(4, 55000, h(0), h(24), opt="P", side="long", coin_size=0.05),
+            leg(5, 72000, h(0), h(24), opt="c", side="SHORT", coin_size=0.10),   # case-insensitive
+            leg(6, 65000, h(0), h(24), coin_size=0.30)]                          # type unknown
+    sp = {k: round(v, 6) for k, v in size_split(legs).items()}
+    assert sp == {"call_long": 0.05, "call_short": 0.30, "put_long": 0.05, "put_short": 0.17}
+
+
+def test_size_split_unknown_coin_size_blanks_only_its_key():
+    legs = [leg(1, 70000, h(0), h(24), opt="C", side="short"),
+            leg(2, 60000, h(0), h(24), opt="P", side="short", coin_size=None)]
+    assert size_split(legs) == {"call_long": 0.0, "call_short": 0.01, "put_long": 0.0,
+                                "put_short": None}
+
+
+def test_exposure_split_by_type_and_side():
+    legs = [leg(1, 70000, h(0), h(24), closed=h(24), opt="C", side="short", coin_size=0.01),
+            leg(2, 60000, h(0), h(48), closed=h(48), opt="P", side="short", coin_size=0.02),
+            leg(3, 75000, h(12), h(24), closed=h(24), opt="C", side="long", coin_size=0.005)]
+    segs = [(s.t0, s.t1) + tuple(round(v, 6) for v in s.values())
+            for s in exposure_segments(legs, NOW)]
+    #                      total  c_long  c_short p_long p_short
+    assert segs == [(h(0), h(12), 0.03, 0.0, 0.01, 0.0, 0.02),
+                    (h(12), h(24), 0.035, 0.005, 0.01, 0.0, 0.02),
+                    (h(24), h(48), 0.02, 0.0, 0.0, 0.0, 0.02)]
+
+
+def test_exposure_roll_from_call_to_put_of_same_size_is_a_change():
+    legs = [leg(1, 70000, h(0), h(24), closed=h(24), opt="C", side="short"),
+            leg(2, 60000, h(24), h(48), closed=h(48), opt="P", side="short")]
+    segs = exposure_segments(legs, NOW)
+    assert [(s.t0, s.t1, s.total, s.call_short, s.put_short) for s in segs] == [
+        (h(0), h(24), 0.01, 0.01, 0.0), (h(24), h(48), 0.01, 0.0, 0.01)]
 
 
 def test_auto_bar():

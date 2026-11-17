@@ -42,6 +42,7 @@ from app.domain.boxes import (
     build_boxes,
     closed_early,
     exposure_segments,
+    size_split,
     in_period,
 )
 from app.domain.metrics import deal_metrics, equity_metrics
@@ -251,8 +252,10 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
     """Index candles with every box (strategy) drawn on them, for the user's accounts.
 
     Each leg = a line at its strike from open time to expiry (closed early: solid to the close, a
-    dot, dashed to expiry); each box = the rectangle around its legs, labelled with their total size
-    in coin; `exposure` = total open size over time (legs count until they are closed). Obeys the
+    dot, dashed to expiry); each box = the rectangle around its legs, labelled with their size in
+    coin — `split` = calls / puts × long / short (call_long, call_short, put_long, put_short);
+    `exposure` = open size over time (legs count until they are closed): `total` and the same four
+    split keys per segment. Obeys the
     Dashboard filters (underlying, account) and its own reporting period (frm / till, 'YYYY-MM-DD',
     like the equity graph): only legs whose line overlaps the period are drawn and the boxes are
     built around those legs — the whole box (gold.box_shape) when there is no period.
@@ -276,7 +279,8 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
                 closed_at=lg.closed_at, last_seen_at=lg.last_seen_at, size=_num(lg.size),
                 size_coin=_num(lg.size_coin), coin=lg.coin, close_type=lg.close_type,
                 pnl_usd=_num(lg.realized_pnl_usd if lg.realized_pnl_usd is not None
-                             else lg.upl_usd))
+                             else lg.upl_usd),
+                opt_type=lg.opt_type, side=lg.side)
             if in_period(dom, lo, hi):
                 pairs.append((lg, dom))
         if lo is None and hi is None:                # whole history: the gold rectangles
@@ -316,6 +320,9 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
 
     multi_acct = len({b.subaccount_id for b in boxes}) > 1
     box_key = {(b.subaccount_id, b.strategy_id): i for i, b in enumerate(boxes)}
+    box_legs: dict[tuple, list] = defaultdict(list)   # the shown legs of each box → its split
+    for _lg, dom in pairs:
+        box_legs[(dom.subaccount_id, dom.strategy_id)].append(dom)
     out_boxes = []
     for i, b in enumerate(boxes):
         name, color = meta.get(b.strategy_id, ("(no box)", None))
@@ -331,6 +338,7 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
             "strike_lo": _num(b.strike_lo), "strike_hi": _num(b.strike_hi),
             "n_legs": b.n_legs, "n_open_legs": b.n_open_legs, "status": b.status,
             "size_coin": size_coin, "size_contracts": size_ct, "coin": b.coin, "label": label,
+            "split": size_split(box_legs.get((b.subaccount_id, b.strategy_id), [])),
             "net_pnl_usd": _num(b.net_pnl_usd),
         })
     out_legs = [{
@@ -342,7 +350,9 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
         "opened_at": _iso(lg.pos_opened_at), "expires_at": _iso(lg.expires_at),
         "closed_at": _iso(lg.closed_at), "pnl_usd": dom.pnl_usd,
     } for lg, dom in pairs]
-    exposure = [{"t0": _iso(sg.t0), "t1": _iso(sg.t1), "total": sg.total}
+    exposure = [{"t0": _iso(sg.t0), "t1": _iso(sg.t1), "total": sg.total,
+                 "call_long": sg.call_long, "call_short": sg.call_short,
+                 "put_long": sg.put_long, "put_short": sg.put_short}
                 for sg in exposure_segments([dom for _lg, dom in pairs], now)]
     coin = next((b.coin for b in boxes if b.coin), None) or (chosen or "").split("-")[0] or None
     return {

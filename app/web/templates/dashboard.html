@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Dashboard · CEX Option Reporting{% endblock %}
 {% block nav_dash %}active{% endblock %}
-{% block head %}<script src="/static/chartnav.js?v={{ asset_ver }}"></script>{% endblock %}
+{% block head %}<script src="/static/chartnav.js?v={{ asset_ver }}"></script>
+<script src="/static/chartfs.js?v={{ asset_ver }}"></script>{% endblock %}
 {% block body %}
 <h1 class="page">Dashboard</h1>
 <p class="sub">Open book &amp; performance across strikes and maturities.</p>
@@ -12,15 +13,17 @@
 </div>
 
 <div class="grid" style="margin-bottom:18px">
-  <div class="card">
+  <div class="card" data-fs="c-pricebox">
     <h2>① Price with strategy boxes</h2>
-    <p class="hint">Index price with every box drawn on it: each line is an option leg at its strike, from
+    <p class="hint fs-hide">Index price with every box drawn on it: each line is an option leg at its strike, from
       open time (tick) to expiry (tick) — closed early: a dot at the close, then dashed to expiry; the shaded
       side is where the leg pays off — above a call, below a put; green = bought, red = sold. The box covers
-      all its legs; the label is the box's total size. Below: total open size (legs count until closed).
-      Times in UTC.<br>Navigate like TradingView: drag the chart to move; click it, then use the wheel to zoom
+      all its legs; its label splits the size: C = calls, P = puts, + bought, − sold; each line shows its
+      own size, <span style="color:#22c55e">+ bought</span> / <span style="color:#ef4444">− sold</span> (above a call, below a put).
+      Below: open size over time — calls above 0, puts below; green = long, red = short (a leg counts
+      until it is closed). Sizes in coin (BTC). Times in UTC.<br>Navigate like TradingView: drag the chart to move; click it, then use the wheel to zoom
       (trackpad: two fingers move / zoom, pinch zooms); drag or scroll the price / date scale to stretch it;
-      double-click to go back. More candles load as you move; with Candles = Auto their size follows the zoom.
+      double-click to go back. More candles load as you move.
       <b>?</b> under the price scale lists everything.</p>
     <div class="rpbar">
       <label>Reporting period</label>
@@ -34,13 +37,13 @@
       </select>
       <label>From</label><input type="date" id="from-pb">
       <label>Till</label><input type="date" id="till-pb">
-      <label>Candles</label>
+      <span class="rp-group"><label>Candles</label>
       <select id="pb-bar" style="min-width:90px">
-        <option value="auto" selected>Auto</option>
         <option value="1h">1H</option>
         <option value="4h">4H</option>
-        <option value="1d">1D</option>
+        <option value="1d" selected>1D</option>
       </select>
+      <span id="pb-bar-range" class="bar-range"></span></span>
     </div>
     <p class="hint" id="pb-meta" style="margin-top:-4px"></p>
     <div id="c-pricebox" class="chart" style="height:580px"></div>
@@ -48,7 +51,7 @@
 </div>
 
 <div class="grid" style="margin-bottom:18px">
-  <div class="card">
+  <div class="card" data-fs="c-equity c-pnl">
     <h2>② Equity curve &amp; daily net P&amp;L
       <label class="sync-toggle"><input type="checkbox" id="sync-1" checked> Sync timelines</label></h2>
     <p class="hint" id="equity-header">Account value over time · realized + unrealized per day.</p>
@@ -65,7 +68,7 @@
       <label>From</label><input type="date" id="from-1">
       <label>Till</label><input type="date" id="till-1">
     </div>
-    <p class="hint" style="margin-top:-4px">Navigate as on graph ①: drag to move; click the chart, then use the
+    <p class="hint fs-hide" style="margin-top:-4px">Navigate as on graph ①: drag to move; click the chart, then use the
       wheel to zoom (trackpad: two fingers move / zoom, pinch zooms); drag or scroll the value / date scale to
       stretch it; double-click to go back. Data outside the period loads as you move. Times in UTC.</p>
     <div id="c-equity" class="chart"></div>
@@ -74,7 +77,7 @@
 </div>
 
 <div class="grid" style="margin-bottom:18px">
-  <div class="card">
+  <div class="card" data-fs="c-asset-equity c-asset-pnl">
     <h2>②b Asset equity &amp; daily net P&amp;L (in-kind)
       <label class="sync-toggle"><input type="checkbox" id="sync-1b" checked> Sync timelines</label></h2>
     <p class="hint">Balance &amp; P&amp;L for a single asset, denominated in that asset.
@@ -93,7 +96,7 @@
       <label>From</label><input type="date" id="from-1b">
       <label>Till</label><input type="date" id="till-1b">
     </div>
-    <p class="hint" style="margin-top:-4px">Navigate as on graph ①: drag to move; click the chart, then use the
+    <p class="hint fs-hide" style="margin-top:-4px">Navigate as on graph ①: drag to move; click the chart, then use the
       wheel to zoom (trackpad: two fingers move / zoom, pinch zooms); drag or scroll the value / date scale to
       stretch it; double-click to go back. Data outside the period loads as you move. Times in UTC.</p>
     <div id="c-asset-equity" class="chart"></div>
@@ -142,7 +145,8 @@ async function boot() {
   document.getElementById("f-subaccount").onchange = e => { state.subaccount = e.target.value; renderAll(); };
   document.getElementById("f-asset").onchange = () => renderAssetEquity();
   document.getElementById("f-expiry").onchange = () => renderPayoff();
-  document.getElementById("pb-bar").onchange = () => renderPriceBoxes();
+  document.getElementById("pb-bar").onchange = () => { pbShowRange(); renderPriceBoxes(); };
+  pbShowRange();
   setupPeriod("pb", renderPriceBoxes);  // same presets / default (Last 1 month) as graph ②
   document.getElementById("sync-1").onchange = () => renderEquity();
   document.getElementById("sync-1b").onchange = () => renderAssetEquity();
@@ -235,8 +239,33 @@ const PB_AREA_LAYER = 1 - Math.pow(1 - PB_AREA_ALPHA, 1 / PB_AREA_STEPS);   // p
 const midT = (a, b) => new Date((Date.parse(a) + Date.parse(b)) / 2).toISOString();
 
 const pbLabel = col => ({bgcolor: "#1b1f26", bordercolor: col, font: {color: "#e6edf7", size: 12}});
+// Size split (build 13): calls / puts × long (+, green) / short (−, red), in coin
+const pbNum = v => String(+Number(v).toFixed(4));
+const PB_SPLIT = [["C", "call_long", "call_short"], ["P", "put_long", "put_short"]];
+function pbSplitText(sp){                       // "C +5 −20 · P −17", "" when unknown; drawn in the
+  if (!sp || Object.values(sp).some(v => v == null)) return "";   // box colour — the sign shows the side
+  return PB_SPLIT.map(([t, lo, sh]) => {
+    const xs = [];
+    if (sp[lo]) xs.push(`+${pbNum(sp[lo])}`);
+    if (sp[sh]) xs.push(`−${pbNum(sp[sh])}`);
+    return xs.length ? `${t} ${xs.join(" ")}` : "";
+  }).filter(Boolean).join(" · ");
+}
+function pbSplitRows(sp, coin){                 // hover lines: calls / puts, long · short
+  if (!sp || Object.values(sp).some(v => v == null)) return "";
+  const c = coin ? " " + escH(coin) : "";
+  return `<br>calls: long ${pbNum(sp.call_long)} · short ${pbNum(sp.call_short)}${c}` +
+         `<br>puts: long ${pbNum(sp.put_long)} · short ${pbNum(sp.put_short)}${c}`;
+}
+// the middle of the part of [t0, t1] that is on screen (or of the whole span when it is off screen)
+function pbMid(t0, t1, v0, v1){ const a = Math.max(t0, v0), b = Math.min(t1, v1); return a < b ? (a + b) / 2 : (t0 + t1) / 2; }
+function pbNiceStep(m){
+  const raw = m / 2, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+}
 function pbBoxHover(b){
   return `<b>${escH(b.legend)}</b><br>${b.n_legs} legs (${b.n_open_legs} open) · total ${escH(b.label)}` +
+    pbSplitRows(b.split, b.coin) +
     `<br>${fmtUtc(b.started_at)} → ${fmtUtc(b.ends_at)}` +
     `<br>strikes ${fmtPx(b.strike_lo)} – ${fmtPx(b.strike_hi)}` +
     (b.net_pnl_usd != null ? `<br>P&L ${usd(b.net_pnl_usd, 2)}` : "");
@@ -273,7 +302,7 @@ async function renderPriceBoxes(){
     autoBars: d.auto_bars || [{bar: "1h", max_days: 14}, {bar: "4h", max_days: 90}],
     home: [Date.parse(d.range[0]), Date.parse(d.range[1])], now: Date.parse(d.now),
     cover: [Date.parse(d.range[0]), Date.parse(d.range[1])], lo: -Infinity, hi: Date.parse(d.now),
-    busy: false, spans: [], labels: [], view: null});
+    busy: false, spans: [], labels: [], legLabels: [], view: null});
   pbSetCandles(d.candles.map(c => ({t: Date.parse(c.t), o: c.o, h: c.h, l: c.l, c: c.c})));
   // the candlestick is always trace 0 when there is a price source: candles loaded while you
   // drag / zoom go into it
@@ -308,13 +337,16 @@ async function renderPriceBoxes(){
         hoveron: "fills", hoverinfo: "text", text: pbBoxHover(b), hoverlabel: pbLabel(col)});
       // label at the box's left edge, or at the left edge of the view when the box starts before it
       const lx = Date.parse(b.started_at) < Date.parse(d.range[0]) ? plotT(d.range[0]) : x0;
-      PB.labels.push({i: ann.length, t0: Date.parse(b.started_at), t1: Date.parse(b.ends_at),
+      PB.labels.push({i: ann.length, t0: Date.parse(b.started_at), t1: Date.parse(b.ends_at), grp,
                       x: Date.parse(b.started_at) < PB.home[0] ? PB.home[0] : Date.parse(b.started_at)});
       PB.spans.push({t0: Date.parse(b.started_at), t1: Date.parse(b.ends_at), lo: b.strike_lo,
                      hi: b.strike_hi, grp});
       ann.push({x: lx, y: b.strike_hi, xanchor: "left", yanchor: "bottom", showarrow: false, xshift: 2,
-        text: `<b>${escH(b.label)}</b>  ${escH(b.name)}`, font: {color: col, size: 11},
-        bgcolor: "rgba(20,23,28,0.75)", borderpad: 2});
+        yshift: 14,                              // build 13 rev 2: one leg-label row above the top line
+        text: (() => { const sp = pbSplitText(b.split);           // build 13: split, not the sum
+          return sp ? `<b>${escH(b.name)}</b>  ${sp} ${escH(b.coin || "")}`
+                    : `<b>${escH(b.label)}</b>  ${escH(b.name)}`; })(),
+        font: {color: col, size: 11}});           // build 13 rev 4: no background, as the leg sizes
     }
     const solid = {x: [], y: [], t: []}, dash = {x: [], y: []}, dots = {x: [], y: [], t: []},
           ticks = {x: [], y: []}, areas = {};
@@ -333,6 +365,21 @@ async function renderPriceBoxes(){
           const y1 = k + dir * areaH * (PB_AREA_STEPS - i) / PB_AREA_STEPS;
           ar.x.push(plotT(a), plotT(se), plotT(se), plotT(a), plotT(a), null);
           ar.y.push(k, k, y1, y1, k, null);
+        }
+      }
+      // build 13: the leg's size in the middle of its solid part (kept centred on what is on
+      // screen while you move); above a call, below a put; + green bought, − red sold
+      {
+        const sz = l.size_coin != null ? pbNum(Math.abs(l.size_coin))
+                 : l.size != null ? pbNum(Math.abs(l.size)) + " ct" : null;
+        if (sz != null) {
+          const lt0 = Date.parse(a), lt1 = Date.parse(se), up = ot !== "P";
+          const lx = pbMid(lt0, lt1, PB.home[0], PB.home[1]);
+          PB.legLabels.push({i: ann.length, t0: lt0, t1: lt1, x: lx, grp});
+          ann.push({x: msPlot(lx), y: k, xref: "x", yref: "y", showarrow: false,
+            yanchor: up ? "bottom" : "top", yshift: up ? 2 : -2,
+            text: (sd === "long" ? "+" : sd === "short" ? "−" : "") + sz,
+            font: {size: 8, color: sd === "long" ? `rgb(${PB_BUY})` : sd === "short" ? `rgb(${PB_SELL})` : col}});
         }
       }
       solid.x.push(plotT(a), plotT(midT(a, se)), plotT(se), null);
@@ -363,34 +410,49 @@ async function renderPriceBoxes(){
                                   line: {color: "#14171c", width: 1.5}}});
   });
 
-  // Total open size (coin) under the candles: exact step line; dashed lines only where the level
-  // really changes — brief blips (e.g. minutes between an expiry and the next roll) are ignored by
-  // comparing the segments that last at least ~0.8% of the range; totals written on wide segments.
+  // Open size under the candles (build 13): split into calls (above 0) and puts (below 0), long =
+  // green / short = red as on the legs. Overlapping step lines (not stacked), so each value reads
+  // straight off the scale, which shows sizes without a minus sign. Values written on wide levels.
   const ex = d.exposure, span = Date.parse(d.range[1]) - Date.parse(d.range[0]);
+  const coin = d.coin || "";
+  let y2 = {range: [-1, 1], tickvals: [0], ticktext: ["0"]};
   if (ex.length) {
+    const SER = [{k: "call_short", dir: 1, rgb: PB_SELL, name: "Calls sold"},
+                 {k: "call_long", dir: 1, rgb: PB_BUY, name: "Calls bought"},
+                 {k: "put_short", dir: -1, rgb: PB_SELL, name: "Puts sold"},
+                 {k: "put_long", dir: -1, rgb: PB_BUY, name: "Puts bought"}];
     const xs = ex.map(sg => plotT(sg.t0)).concat([plotT(ex[ex.length - 1].t1)]);
-    const ys = ex.map(sg => sg.total).concat([ex[ex.length - 1].total]);
-    traces.push({type: "scatter", mode: "lines", x: xs, y: ys, xaxis: "x", yaxis: "y2",
-      line: {shape: "hv", color: "#f39c33", width: 1.5}, fill: "tozeroy",
-      fillcolor: "rgba(243,156,51,0.12)", name: "Total open size", showlegend: false,
-      hovertemplate: "total open %{y} " + (d.coin || "") + "<extra></extra>"});
-    const wide = ex.filter(sg => Date.parse(sg.t1) - Date.parse(sg.t0) >= span * 0.008);
-    // merge consecutive wide segments with the same total into one level
-    const levels = [];
-    for (const sg of wide) {
-      const lv = levels[levels.length - 1];
-      if (lv && Math.abs(lv.total - sg.total) < 1e-9) lv.t1 = sg.t1;
-      else levels.push({t0: sg.t0, t1: sg.t1, total: sg.total});
+    const cd = ex.map(sg => [sg.call_long, sg.call_short, sg.put_long, sg.put_short].map(v => pbNum(v || 0)));
+    const hov = `<b>Open size</b>${coin ? " (" + escH(coin) + ")" : ""}` +
+      "<br>calls: long %{customdata[0]} · short %{customdata[1]}" +
+      "<br>puts: long %{customdata[2]} · short %{customdata[3]}<extra></extra>";
+    let m = 0;
+    for (const sr of SER) {
+      const vals = ex.map(sg => sg[sr.k] || 0);
+      if (!vals.some(v => v)) continue;                  // none of this kind in the period
+      m = Math.max(m, ...vals);
+      const ys = vals.map(v => sr.dir * v); ys.push(ys[ys.length - 1]);
+      traces.push({type: "scatter", mode: "lines", x: xs, y: ys, xaxis: "x", yaxis: "y2",
+        line: {shape: "hv", color: `rgb(${sr.rgb})`, width: 1.5}, fill: "tozeroy",
+        fillcolor: `rgba(${sr.rgb},0.14)`, name: sr.name, showlegend: false, hoverinfo: "skip"});
     }
-    levels.forEach((lv, i) => {
-      if (i > 0)
-        shapes.push({type: "line", xref: "x", x0: plotT(lv.t0), x1: plotT(lv.t0), yref: "y2 domain",
-          y0: 0, y1: 1, line: {color: "rgba(230,237,247,0.4)", width: 1, dash: "dash"}});
-      if (Date.parse(lv.t1) - Date.parse(lv.t0) >= span * 0.06)
-        ann.push({x: plotT(midT(lv.t0, lv.t1)), y: lv.total, xref: "x", yref: "y2", yanchor: "bottom",
-          showarrow: false, text: fmtCoin(lv.total, d.coin), font: {color: "#f39c33", size: 10}});
-    });
+    if (m > 0) {                                         // symmetric scale: 0 in the middle;
+      const st = pbNiceStep(m), n = Math.floor(m / st), r = m * 1.6;    // ticks inside the data,
+      const tv = [];                                     // headroom for the Calls / Puts tags
+      for (let i = -n; i <= n; i++) tv.push(i * st);
+      y2 = {range: [-r, r], tickvals: tv, ticktext: tv.map(v => pbNum(Math.abs(v)))};
+      // build 13 rev 2: hover anywhere inside a half that holds positions (upper = calls, lower =
+      // puts) — a transparent heatmap, one cell per segment × half; empty cells don't hover
+      const has = k => ex.map(sg => (sg[k + "_long"] || 0) + (sg[k + "_short"] || 0) > 0 ? 1 : null);
+      traces.push({type: "heatmap", xaxis: "x", yaxis: "y2", x: xs, y: [-r, 0, r],
+        z: [has("put"), has("call")], customdata: [cd, cd], hovertemplate: hov, hoverongaps: false,
+        zmin: 0, zmax: 1, showscale: false, colorscale: [[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
+        name: "Open size", showlegend: false, hoverlabel: pbLabel("#8b93a1")});
+    }
   }
+  for (const [txt, y, ya] of [["Calls ▲", 1, "top"], ["Puts ▼", 0, "bottom"]])   // build 13 rev 2: centred
+    ann.push({xref: "paper", x: 0.5, yref: "y2 domain", y, xanchor: "center", yanchor: ya, showarrow: false,
+              text: txt, font: {color: "#aab2bf", size: 12}, bgcolor: "rgba(20,23,28,0.6)", borderpad: 1});
   // "now" = the dotted line (server time); build 9 rev 2: a hover label along it (date and time, UTC
   // and the browser's local time) and it moves on every minute
   // (build 10: the line, its hover points and the per-minute move are ChartNav's, shared with ②)
@@ -398,10 +460,10 @@ async function renderPriceBoxes(){
   const now = {shape: shapes.length, traces: [traces.length], skew: nowMs - Date.now()};  // server − browser
   shapes.push(ChartNav.nowShape(nowMs));
   traces.push(ChartNav.nowTrace(nowMs, "y3"));
-  const exMax = Math.max(0, ...ex.map(sg => sg.total));
-  if (ex.length && exMax > 0) {
+  if (y2.tickvals.length > 1) {                // build 13: along the whole mirrored strip
+    const r2 = y2.range[1];
     now.traces.push(traces.length);
-    traces.push(ChartNav.nowTrace(nowMs, "y2", Array.from({length: 9}, (_, i) => exMax * i / 8)));
+    traces.push(ChartNav.nowTrace(nowMs, "y2", Array.from({length: 17}, (_, i) => -r2 + 2 * r2 * i / 16)));
   }
   if (last) ann.push({xref: "paper", x: 1, y: last.close, yref: "y", xanchor: "left", showarrow: false,
     text: fmtPx(last.close), font: {color: "#fff", size: 11}, borderpad: 3,
@@ -416,9 +478,11 @@ async function renderPriceBoxes(){
   await Plotly.newPlot(gd, traces, layout({
     xaxis: {type: "date", range: [plotT(d.range[0]), plotT(d.range[1])], rangeslider: {visible: false},
             anchor: "y2", ...tk},
-    yaxis: {domain: [0.2, 1], side: "right", tickformat: ",.0f", ...(y0 ? {range: y0} : {})},
-    yaxis2: {domain: [0, 0.15], side: "right", rangemode: "tozero", tickformat: ".2~f", fixedrange: true,
-             title: {text: d.coin || ""}, gridcolor: "#232833", zerolinecolor: "#333"},
+    yaxis: {domain: [0.25, 1], side: "right", tickformat: ",.0f", ...(y0 ? {range: y0} : {})},
+    // build 13: mirrored open-size strip (calls above 0, puts below), a little taller than before
+    yaxis2: {domain: [0, 0.2], side: "right", fixedrange: true, ...y2,
+             title: {text: d.coin || ""}, gridcolor: "#232833", zeroline: true,
+             zerolinecolor: "#5a6270", zerolinewidth: 1},
     // hidden 0…1 scale over the price area: only for the hover points along the "now" line
     yaxis3: ChartNav.NOW_AXIS,
     shapes, annotations: ann, legend: {orientation: "h", y: 1.07, x: 0},
@@ -429,6 +493,7 @@ async function renderPriceBoxes(){
   ChartNav.attach(gd).reset({
     home: () => PB.home, fitY: pbFit, extra: pbExtra, onView: pbOnView, limits: pbLimits,
     ticks: 2, now});                           // dense date ticks; "now" moves every minute
+  gd.on("plotly_restyle", pbSyncLabels);       // build 13: a box hidden in the legend hides its labels
 }
 
 // --- ① navigation (build 9): fit, labels and more candles while you move ------------------------
@@ -438,6 +503,20 @@ const BAR_MS = {"1h": 36e5, "4h": 144e5, "1d": 864e5};
 const PB_VIEW_BARS = 2000;      // zooming out stops at this many candles on screen
 const PB_KEEP = 6000;           // candles kept in the chart at most (far ones are dropped)
 const msPlot = ms => new Date(ms).toISOString().slice(0, 23).replace("T", " ");   // UTC-naive
+// Candles combobox: the UTC window each candle covers (fixed UTC boundaries, see gold.index_candle)
+const PB_BAR_RANGES = {
+  "1h": ["HH:00–HH:59"],
+  "4h": ["00:00–03:59", "04:00–07:59", "08:00–11:59", "12:00–15:59", "16:00–19:59", "20:00–23:59"],
+  "1d": ["00:00–23:59"],
+};
+function pbShowRange(){
+  const bar = document.getElementById("pb-bar").value, el = document.getElementById("pb-bar-range");
+  const r = PB_BAR_RANGES[bar] || [];
+  el.innerHTML = r.length > 1                  // 4H: six windows as a compact 3 × 2 grid, UTC once
+    ? `<span class="br-grid">${r.map(x => `<span>${x}</span>`).join("")}</span><span>UTC</span>`
+    : `<span>${r[0] || ""} UTC</span>`;
+  el.title = `Each ${bar.toUpperCase()} candle covers ${r.map(x => x + " UTC").join(", ")}`;
+}
 const pbBarText = (bar, auto) => `${String(bar).toUpperCase()} candles${auto ? " (auto)" : ""}`;
 function pbAutoBar(span){                      // same rule as the server (AUTO_BAR_MAX_DAYS)
   for (const r of PB.autoBars) if (span / 864e5 <= r.max_days) return r.bar;
@@ -472,14 +551,31 @@ function pbFit(t0, t1, ignoreHidden){
   const pad = (hi - lo) * 0.05 || Math.abs(hi) * 0.01 || 1;
   return [lo - pad, hi + pad];
 }
-// Box labels stay at the left edge of the view while the box is cut by it.
-function pbExtra(t0){
+// Box labels stay at the left edge of the view while the box is cut by it; leg sizes (build 13)
+// stay in the middle of the part of their line that is on screen.
+function pbExtra(t0, t1){
   const upd = {};
   for (const lb of PB.labels) {
     const x = lb.t0 < t0 && lb.t1 > t0 ? t0 : lb.t0;
     if (x !== lb.x) { lb.x = x; upd[`annotations[${lb.i}].x`] = msPlot(x); }
   }
+  for (const lb of PB.legLabels || []) {
+    const x = pbMid(lb.t0, lb.t1, t0, t1);
+    if (Math.abs(x - lb.x) > 1) { lb.x = x; upd[`annotations[${lb.i}].x`] = msPlot(x); }
+  }
   return upd;
+}
+// Labels follow their box's legend visibility (a legend click hides the box's lines and areas)
+function pbSyncLabels(){
+  const gd = document.getElementById("c-pricebox"), A = (gd.layout || {}).annotations;
+  if (!gd.data || !A) return;
+  const hidden = new Set(gd.data.filter(t => t.visible === "legendonly").map(t => t.legendgroup));
+  const upd = {};
+  for (const lb of [...(PB.labels || []), ...(PB.legLabels || [])]) {
+    const vis = !hidden.has(lb.grp);
+    if (A[lb.i] && (A[lb.i].visible !== false) !== vis) upd[`annotations[${lb.i}].visible`] = vis;
+  }
+  if (Object.keys(upd).length) Plotly.relayout(gd, upd);
 }
 function pbLimits(){
   const auto = PB.barSel === "auto", st = BAR_MS[auto ? "1h" : PB.barSel];

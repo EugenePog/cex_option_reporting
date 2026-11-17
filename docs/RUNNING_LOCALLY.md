@@ -338,9 +338,11 @@ Then reload the Dashboard.
 - **Mac trackpad:** two fingers left / right = move, up / down = zoom, pinch = zoom.
 - **Back:** double-click the chart or **⟲** = the reporting period; double-click the price scale or
   **A** = prices fit again. **?** lists all gestures.
-- **More data:** candles before / after the reporting period load as you move; with *Candles = Auto*
-  the size switches 1H ↔ 4H ↔ 1D with the zoom (≤ 14 days 1H, ≤ 90 days 4H). Boxes stay those of the
+- **More data:** candles before / after the reporting period load as you move. Boxes stay those of the
   reporting period.
+- **Candles:** 1H / 4H / 1D (default 1D; the Auto option was removed). The text next to the combobox
+  shows the UTC window of each candle — fixed UTC boundaries: 1H = HH:00–HH:59, 4H = 00:00–03:59 …
+  20:00–23:59, 1D = 00:00–23:59.
 - **Rev 2:** the date axis has twice as many ticks (e.g. every 3 days for a month), re-picked as you
   zoom. The dotted vertical line is **now** — hover it for the date and time (UTC and your local time);
   it moves on every minute.

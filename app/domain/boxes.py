@@ -6,9 +6,11 @@
   * A BOX (= strategy) is the rectangle that covers all its legs of one underlying: left = first
     leg opened, right = last line end, bottom / top = lowest / highest strike. The border sits
     exactly on the outer lines — no padding.
-  * The box LABEL is the total size of its legs (Σ contracts × ct_val, in coin).
-  * Under the candles, the TOTAL OPEN SIZE over time: a leg counts from its open time until it is
-    closed (or until now while open), so early closes show up even though the line runs to expiry.
+  * The box LABEL is the size of its legs (Σ contracts × ct_val, in coin), split into calls /
+    puts × long (bought) / short (sold) — see size_split. Each leg line is labelled with its size.
+  * Under the candles, the OPEN SIZE over time, split the same way (calls drawn above 0, puts
+    below): a leg counts from its open time until it is closed (or until now while open), so early
+    closes show up even though the line runs to expiry.
   * A REPORTING PERIOD keeps the legs whose line overlaps it; the boxes are then drawn around those
     legs only (same rule), so a box never covers strikes of legs that are not shown.
 """
@@ -36,6 +38,8 @@ class Leg:
     coin: str | None = None
     pnl_usd: float | None = None    # realized (closed) or unrealized (open)
     close_type: str | None = None   # 'close' (traded) | 'expiry' — closed legs only
+    opt_type: str | None = None     # 'C' | 'P' — for the call / put split
+    side: str | None = None         # 'long' | 'short' — for the long / short split
 
 
 def line_end(leg: Leg) -> datetime:
@@ -89,6 +93,30 @@ class Box:
     leg_ids: list[int] = field(default_factory=list)
 
 
+# Size split (graph ①): calls / puts × long (bought) / short (sold); sizes are magnitudes in coin.
+SPLIT_KEYS = ("call_long", "call_short", "put_long", "put_short")
+
+
+def split_key(leg: Leg) -> str | None:
+    """'call_long' | 'call_short' | 'put_long' | 'put_short', or None when type / side unknown."""
+    ot, sd = (leg.opt_type or "").upper(), (leg.side or "").lower()
+    if ot not in ("C", "P") or sd not in ("long", "short"):
+        return None
+    return ("call_" if ot == "C" else "put_") + sd
+
+
+def size_split(legs: list[Leg]) -> dict[str, float | None]:
+    """Σ |size_coin| per split key (0.0 for a key without legs; None when one of its legs has no
+    coin size — a partial sum would mislabel the box). Legs of unknown type / side are left out."""
+    out: dict[str, float | None] = {k: 0.0 for k in SPLIT_KEYS}
+    for lg in legs:
+        k = split_key(lg)
+        if k is None or out[k] is None:
+            continue
+        out[k] = None if lg.size_coin is None else out[k] + abs(float(lg.size_coin))
+    return out
+
+
 def _sum_or_none(values: list[float | None]) -> float | None:
     """Σ of the values, or None if any is unknown (a partial total would mislabel the box)."""
     if not values or any(v is None for v in values):
@@ -132,34 +160,46 @@ def build_boxes(legs: list[Leg]) -> list[Box]:
 class Segment:
     t0: datetime
     t1: datetime
-    total: float                    # open size in coin
+    total: float                    # open size in coin (every leg with a coin size)
+    call_long: float = 0.0          # … of which bought calls
+    call_short: float = 0.0         # sold calls
+    put_long: float = 0.0           # bought puts
+    put_short: float = 0.0          # sold puts
+
+    def values(self) -> tuple[float, ...]:
+        return (self.total, self.call_long, self.call_short, self.put_long, self.put_short)
 
 
 def exposure_segments(legs: list[Leg], now: datetime) -> list[Segment]:
-    """Total open size (coin) between consecutive change points. Legs without a coin size are
-    skipped; zero-total gaps are kept (they show as 0). Adjacent segments with the same total are
-    merged, so every segment boundary is a real change."""
-    events: dict[datetime, float] = defaultdict(float)
+    """Open size (coin) between consecutive change points: the total and its split into calls /
+    puts × long / short (legs of unknown type / side count in the total only). Legs without a coin
+    size are skipped; zero-total gaps are kept (they show as 0). Adjacent segments with the same
+    values are merged, so every segment boundary is a real change — a roll from a call into a put
+    of the same size is a change."""
+    events: dict[datetime, list[float]] = defaultdict(lambda: [0.0] * (1 + len(SPLIT_KEYS)))
     for lg in legs:
         if lg.size_coin is None:
             continue
         end = open_until(lg, now)
         if end <= lg.opened_at:
             continue
-        events[lg.opened_at] += float(lg.size_coin)
-        events[end] -= float(lg.size_coin)
+        sz, k = abs(float(lg.size_coin)), split_key(lg)
+        for i in (0,) if k is None else (0, 1 + SPLIT_KEYS.index(k)):
+            events[lg.opened_at][i] += sz
+            events[end][i] -= sz
     if not events:
         return []
     times = sorted(events)
     segs: list[Segment] = []
-    total = 0.0
+    run = [0.0] * (1 + len(SPLIT_KEYS))
     for t0, t1 in zip(times, times[1:], strict=False):
-        total += events[t0]
-        val = round(total, 10)
-        if segs and abs(segs[-1].total - val) < 1e-12 and segs[-1].t1 == t0:
+        run = [a + b for a, b in zip(run, events[t0], strict=True)]
+        val = tuple(round(v, 10) for v in run)
+        if segs and segs[-1].t1 == t0 and all(
+                abs(a - b) < 1e-12 for a, b in zip(segs[-1].values(), val, strict=True)):
             segs[-1].t1 = t1
         else:
-            segs.append(Segment(t0, t1, val))
+            segs.append(Segment(t0, t1, *val))
     # trim leading/trailing zero segments (before the first open / after the last close)
     while segs and segs[0].total == 0:
         segs.pop(0)

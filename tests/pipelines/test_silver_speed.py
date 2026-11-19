@@ -96,3 +96,31 @@ def test_failed_silver_run_is_not_remembered(monkeypatch):
     with pytest.raises(RuntimeError):
         runner.run_silver(skip_unchanged=True)
     assert runner._last_silver_source is None       # the next loop tick tries again
+
+
+# --------------------------------------------------------------- build 17: runs still being written
+def test_newest_snapshot_run_skips_runs_still_being_written():
+    from datetime import UTC, datetime
+
+    t1, t2 = datetime(2026, 11, 19, 15, 58, tzinfo=UTC), datetime(2026, 11, 19, 15, 59, tzinfo=UTC)
+
+    class _S:
+        def execute(self, _q):
+            class _R:
+                def all(self_inner):
+                    return [("OKX", "OKX_K", "", "run-58", t1), ("OKX", "OKX_K", "", "run-59", t2)]
+            return _R()
+
+    class _Lk:
+        def resolve_subaccount(self, *_a):
+            return 5
+
+    assert b2s._latest_snapshot_runs(_S(), _Lk()) == {5: "run-59"}
+    assert b2s._latest_snapshot_runs(_S(), _Lk(), frozenset({"run-59"})) == {5: "run-58"}
+
+
+def test_in_progress_window_is_bounded():
+    # a crashed collector leaves a run RUNNING for ever — it must count again after the window
+    assert b2s.IN_PROGRESS_MAX_MINUTES == 10
+    assert "status = 'RUNNING'" in b2s._IN_PROGRESS_SQL
+    assert f"interval '{b2s.IN_PROGRESS_MAX_MINUTES} minutes'" in b2s._IN_PROGRESS_SQL

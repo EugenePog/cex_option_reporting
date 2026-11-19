@@ -340,9 +340,12 @@ Then reload the Dashboard.
   **A** = prices fit again. **?** lists all gestures.
 - **More data:** candles before / after the reporting period load as you move. Boxes stay those of the
   reporting period.
-- **Candles:** 1H / 4H / 1D (default 1D; the Auto option was removed). The text next to the combobox
-  shows the UTC window of each candle — fixed UTC boundaries: 1H = HH:00–HH:59, 4H = 00:00–03:59 …
-  20:00–23:59, 1D = 00:00–23:59.
+- **Candles:** 1H / 4H / 1D (calendar) / 1D (option) (default 1D (option); the Auto option was
+  removed). The text next to the combobox shows the UTC window of each candle — fixed UTC boundaries:
+  1H = HH:00–HH:59, 4H = 00:00–03:59 … 20:00–23:59, 1D (calendar) = 00:00–23:59, 1D (option) =
+  08:00–07:59 next day (the option day: OKX options expire at 08:00 UTC). The 1D (option) bars are
+  built by the pipeline (`gold.index_candle`, bar `1do`); the first run after the update builds them
+  for the whole history.
 - **Rev 2:** the date axis has twice as many ticks (e.g. every 3 days for a month), re-picked as you
   zoom. The dotted vertical line is **now** — hover it for the date and time (UTC and your local time);
   it moves on every minute.

@@ -391,7 +391,7 @@ def price_candles(start: str, end: str, underlying: str | None = None,
     """Index candles of graph ① for a time window [start, end) — the chart asks for them while it
     is dragged or zoomed past the candles it has, and for another candle size when Candles = Auto
     and the zoom crosses 14 / 90 days. Same source as /price-boxes (the exchange of the user's
-    accounts; the same default underlying). `bar` = 1h / 4h / 1d (anything else: by the window
+    accounts; the same default underlying). `bar` = 1h / 4h / 1d / 1do (anything else: by the window
     length, like Auto). At most MAX_CANDLES: a longer window is cut to its middle, and the answer
     says which window it covers (`start` / `end`); `available` = the first / last candle of that
     size."""

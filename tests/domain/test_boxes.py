@@ -4,6 +4,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.domain.boxes import (
+    BAR_OFFSET,
+    BAR_STEP,
+    BARS,
     Leg,
     auto_bar,
     build_boxes,
@@ -135,6 +138,15 @@ def test_exposure_roll_from_call_to_put_of_same_size_is_a_change():
     segs = exposure_segments(legs, NOW)
     assert [(s.t0, s.t1, s.total, s.call_short, s.put_short) for s in segs] == [
         (h(0), h(24), 0.01, 0.01, 0.0), (h(24), h(48), 0.01, 0.0, 0.01)]
+
+
+def test_candle_sizes_option_day_starts_at_0800_utc():
+    # build 14: "1do" = the option day, 08:00 → 07:59 UTC next day; the others start at 00:00 UTC
+    assert BARS == ("1h", "4h", "1d", "1do")
+    assert set(BAR_STEP) == set(BAR_OFFSET) == set(BARS)
+    assert BAR_STEP["1do"] == BAR_STEP["1d"] == timedelta(days=1)
+    assert BAR_OFFSET["1do"] == timedelta(hours=8)
+    assert all(BAR_OFFSET[b] == timedelta(0) for b in ("1h", "4h", "1d"))
 
 
 def test_auto_bar():

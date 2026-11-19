@@ -168,6 +168,10 @@ make pipeline-silver     # only bronze->silver
 make pipeline-gold       # only silver->gold
 ```
 
+> With the pm2 `pipeline` loop running, a manual run waits (silently) for the loop's current run —
+> both take the same pipeline lock. Stop the loop first and don't suspend the command with Ctrl-Z
+> (a suspended run keeps the lock): `pm2 stop pipeline && make pipeline-gold; pm2 start pipeline`.
+
 ## 10. Start the web dashboard ✅
 
 ```bash
@@ -377,6 +381,51 @@ pm2 restart web       # the Box builder shows each box's seed key
   listed duplicates (same account label twice, same sub-account twice, same rule twice) and run it
   again — nothing was changed.
 - Full format and rules: `seed/README.md`.
+
+### 10j. Faster bronze → silver (build 15, no migration)
+
+```bash
+pm2 restart pipeline   # nothing else — same tables, same results
+```
+
+- **Each bronze table is read once**, and only the JSON fields silver uses come from Postgres
+  (`payload->>'…'`); greeks are loaded only for snapshot runs that have positions.
+- **Bulk writes:** per table, all rows go in one `COPY` into a temporary staging table and one
+  `INSERT … SELECT … ON CONFLICT` merges them — instead of one statement per row.
+- **Unchanged rows are not rewritten** (`… DO UPDATE … WHERE (…) IS DISTINCT FROM (…)`), so a run
+  leaves no dead rows behind. `silver.position_leg` (a few hundred rows) is still refreshed every
+  run — its `updated_at` is the Box builder's "as of" time.
+- **The pm2 loop skips silver** when no bronze row was added and none of the core rows silver
+  reads (accounts, sub-accounts, boxes, rules, Box builder pins) changed since its last silver run.
+  Gold still runs. A manual `make pipeline*` and the Box builder's recompute always run in full.
+- Duplicate keys inside one run (two bronze rows for the same silver row): the newest bronze row
+  wins. Before, the row that came last in the table's physical order won — the same in practice.
+- **Log:** `silver <table>: N written (C new or changed), …` per table and `silver done in X s`
+  (or `silver: skipped — no new bronze rows …`). Measured on 67k positions / 160k bronze rows:
+  **158 s → 3–4 s**, silver identical row for row, and a second run changes 0 rows.
+
+### 10k. Settings → Position hedged (build 16, migration 0025)
+
+```bash
+make migrate          # 0025: core.hedged_position (empty)
+pm2 restart web       # Settings shows "Position hedged" above Telegram notifications
+```
+
+- **What it is:** the hedged amount **Q** per account and asset — how much of the asset (e.g. BTC)
+  the account's options hedge. It is for the future-PnL profile planned next to graph ① (Q hedged by
+  the options vs. the same Q without them); nothing draws it yet.
+- **Where:** admin **Settings → Position hedged**. One row per account × asset — the assets the
+  account has (or had) a balance in, the same list as graph ②b's asset selector. Type Q, then
+  **Save** (or Enter); **Clear** (two clicks) removes it. Empty = not set; 0 is a value.
+- **Balance now** is the account's latest balance snapshot of the asset, shown for reference only:
+  OKX's balance (`eq`) on an options account includes the options' own PnL, so it is not the amount
+  held — that is why Q is typed in.
+- **Seeding (optional):** `seed/<env>/hedged_position.csv` (columns `cex_code, account_label,
+  subacct_name, ccy, qty, note`; template in `seed/examples/`). `make seed` writes the CSV values
+  over values typed in Settings for the same account + asset, and `seed --replace` empties the table
+  (it references `core.subaccount`) — keep values you want to survive a replace in the CSV.
+- Check: `psql "$DATABASE_URL" -c "select * from core.hedged_position order by subaccount_id, ccy;"`;
+  changes are in `core.audit_log` (`settings.hedged.*`).
 
 ---
 

@@ -47,8 +47,9 @@ def test_id_column_is_ignored_and_blank_lines_skipped(tmp_path, caplog):
 
 def test_every_seeded_table_has_a_key_and_known_parents():
     assert set(NATURAL_KEYS) == {"user", "cex_account", "subaccount", "strategy", "strategy_rule",
-                                 "contract_size", "notification_setting"}
+                                 "contract_size", "notification_setting", "hedged_position"}
     assert PARENTS["strategy_rule"] == ("subaccount", "strategy")
+    assert PARENTS["hedged_position"] == ("subaccount",)      # build 16
 
 
 def test_repo_seed_files_have_no_ids():

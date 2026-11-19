@@ -1,5 +1,11 @@
 /* Settings tab (admin) — a list of settings on the left, the selected editor on the right.
  *
+ * Position hedged (build 16): edits core.hedged_position through
+ * /api/admin/settings/hedged-positions — one row per account × asset (the assets the account has a
+ * balance in, as graph ②b's selector). Type the hedged amount Q and Save (or Enter); Clear (two
+ * clicks) removes it (= not set). The server checks the rules (a number ≥ 0, an asset of the
+ * account).
+ *
  * Telegram notifications: edits core.notification_setting through /api/admin/settings/notifications.
  * Each row is edited in place and saved on its own (Save / Delete); "+ Add notification" adds a draft
  * row (Add / Cancel). The server checks every rule (allowed code and asset, one row per asset +
@@ -209,11 +215,112 @@ function addDraft() {
   if (sel) sel.focus();
 }
 
+// ------------------------------------------------------------------ position hedged (build 16)
+const H = { rows: [], edits: {}, armed: null };
+const hpKey = (r) => r.subaccount_id + "|" + r.ccy;
+const fmtNum = (v) => v == null ? "–" : Number(v).toLocaleString("en-US", {maximumFractionDigits: 8});
+const fmtAt = (iso) => iso ? new Date(iso).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "";
+
+async function loadHedged() {
+  const d = await send("GET", "/hedged-positions");
+  H.rows = d.rows; H.armed = null;
+  const keys = new Set(H.rows.map(hpKey));               // keep unsaved edits of rows still there
+  for (const k of Object.keys(H.edits)) if (!keys.has(k)) delete H.edits[k];
+  renderHedged();
+}
+// current values of a row: the saved row + unsaved edits (input values are strings)
+function hpCur(r) {
+  const e = H.edits[hpKey(r)] || {};
+  return {qty: "qty" in e ? e.qty : (r.qty ?? ""), note: "note" in e ? e.note : (r.note ?? "")};
+}
+function hpDirty(r) {
+  const c = hpCur(r);
+  const qtyChanged = c.qty === "" ? r.qty != null : (r.qty == null || +c.qty !== r.qty);
+  return qtyChanged || String(c.note).trim() !== String(r.note ?? "");
+}
+function hpValid(r) { const q = hpCur(r).qty; return q !== "" && Number.isFinite(+q) && +q >= 0; }
+
+function hpRowHtml(r, first) {
+  const k = hpKey(r), c = hpCur(r), dirty = hpDirty(r), saved = r.id != null;
+  const armed = H.armed === k;
+  const bal = !r.has_balance
+    ? `<span class="muted">–</span><span class="tag">no balance</span>`
+    : `${fmtNum(r.balance)}${r.balance_current ? "" : `<span class="tag">none now</span>`}`
+      + `<span class="bal-at">${esc(fmtAt(r.balance_at))}</span>`;
+  return `<tr class="${first ? "grp" : "cont"} ${dirty ? "dirty" : ""} ${saved ? "" : "unset"}" data-key="${esc(k)}">
+    <td>${esc(r.account)}</td>
+    <td><b>${esc(r.ccy)}</b></td>
+    <td class="num">${bal}</td>
+    <td class="q"><input type="number" class="q" data-f="qty" min="0" step="any" value="${esc(c.qty)}" placeholder="not set" aria-label="Hedged ${esc(r.ccy)}"><span class="unit">${esc(r.ccy)}</span></td>
+    <td><input type="text" data-f="note" maxlength="500" value="${esc(c.note)}" placeholder="optional"></td>
+    <td class="upd">${saved ? esc(fmtAt(r.updated_at)) : ""}</td>
+    <td class="act"><button type="button" class="st-btn primary" data-act="save" ${dirty && hpValid(r) ? "" : "disabled"}>Save</button><button type="button" class="st-btn danger ${armed ? "armed" : ""}" data-act="clear" ${saved ? "" : "disabled"} title="Remove Q (= not set)">${armed ? "Confirm clear" : "Clear"}</button></td>
+  </tr>
+  <tr class="errrow" data-err="${esc(k)}" hidden><td colspan="7"><div class="err"></div></td></tr>`;
+}
+
+function renderHedged() {
+  const body = $("hp-body");
+  if (!H.rows.length) {
+    body.innerHTML = `<tr><td colspan="7" class="muted">No asset balances yet — the list fills from the accounts' balance snapshots (as graph ②b).</td></tr>`;
+    return;
+  }
+  let h = "", prev = null;
+  for (const r of H.rows) { h += hpRowHtml(r, r.subaccount_id !== prev); prev = r.subaccount_id; }
+  body.innerHTML = h;
+  body.querySelectorAll("tr[data-key]").forEach(tr => {
+    const k = tr.dataset.key, r = H.rows.find(x => hpKey(x) === k);
+    const save = tr.querySelector('[data-act="save"]');
+    tr.querySelectorAll("[data-f]").forEach(el => {
+      el.oninput = () => {
+        (H.edits[k] || (H.edits[k] = {}))[el.dataset.f] = el.value;
+        tr.classList.toggle("dirty", hpDirty(r));
+        save.disabled = !(hpDirty(r) && hpValid(r));
+        hpErr(k, "");
+      };
+      el.onkeydown = (e) => { if (e.key === "Enter" && !save.disabled) save.click(); };   // Enter = Save
+    });
+    tr.querySelectorAll("[data-act]").forEach(b => b.onclick = () => hpAct(r, b.dataset.act, b));
+  });
+}
+
+function hpErr(k, msg) {
+  const row = $("hp-body").querySelector(`[data-err="${k}"]`);
+  if (!row) { if (msg) toast(msg, "bad"); return; }
+  row.querySelector(".err").textContent = msg; row.hidden = !msg;
+}
+
+async function hpAct(r, what, btn) {
+  const k = hpKey(r);
+  if (what === "clear" && H.armed !== k) { H.armed = k; renderHedged(); return; }   // 1st click arms
+  btn.disabled = true;
+  const path = `/hedged-positions/${r.subaccount_id}/${encodeURIComponent(r.ccy)}`;
+  try {
+    if (what === "save") {
+      const c = hpCur(r);
+      const out = await send("PUT", path, {qty: +c.qty, note: c.note || ""});
+      toast(`Saved: ${r.account} · ${fmtNum(out.qty)} ${r.ccy} hedged`, "ok");
+    } else {
+      await send("DELETE", path);
+      toast(`Cleared: ${r.account} · ${r.ccy} (not set)`, "ok");
+    }
+    delete H.edits[k];
+    await loadHedged();
+  } catch (err) {
+    btn.disabled = false; hpErr(k, err.message);
+  }
+}
+
 async function boot() {
   document.querySelectorAll(".st-item").forEach(b => b.onclick = () => showPanel(b.dataset.panel));
-  showPanel("telegram");                                  // the only setting so far
+  // build 16: the first setting in the list (Position hedged) unless the address names another
+  const panels = [...document.querySelectorAll(".st-item")].map(b => b.dataset.panel);
+  const want = location.hash.slice(1);
+  showPanel(panels.includes(want) ? want : panels[0]);
   $("tg-add").onclick = addDraft;
-  try { await loadTelegram(); }
-  catch (err) { $("tg-body").innerHTML = `<tr><td colspan="7"><div class="err">Could not load: ${esc(err.message)}</div></td></tr>`; }
+  const failed = (id) => (err) => {
+    $(id).innerHTML = `<tr><td colspan="7"><div class="err">Could not load: ${esc(err.message)}</div></td></tr>`;
+  };
+  await Promise.all([loadHedged().catch(failed("hp-body")), loadTelegram().catch(failed("tg-body"))]);
 }
 boot();

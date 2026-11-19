@@ -51,6 +51,20 @@
 .st-table tr.errrow .err{margin:0}
 .st-table tr:has(+ tr.errrow:not([hidden])) td{border-bottom:0}
 
+/* Position hedged (build 16): account × asset grid */
+.hp-table td:nth-child(1){width:auto;min-width:170px;font-weight:600}
+.hp-table td:nth-child(2){width:80px;min-width:0}
+.hp-table td.num,.hp-table th.num{text-align:right;white-space:nowrap;width:150px}
+.hp-table td.q{white-space:nowrap;width:190px}
+.hp-table input.q{width:130px}
+.hp-table td.upd{white-space:nowrap;color:var(--muted);font-size:12px;width:130px}
+.hp-table td.act{width:200px}
+.hp-table tr.grp td{border-top:1px solid #2a3140}
+.hp-table tr.cont td:nth-child(1){color:transparent}
+.hp-table tr.unset td.q input{border-style:dashed}
+.hp-table .tag{margin-left:6px;color:var(--muted);font-size:11px;font-weight:400}
+.hp-table .bal-at{display:block;color:var(--muted);font-size:11px}
+
 .st-foot{margin-top:14px;color:var(--muted);font-size:12.5px;line-height:1.5}
 .st-foot b{color:var(--text)}
 /* Codes legend: one code per row — letter · code · rule */

@@ -34,21 +34,38 @@ def pipeline_lock() -> Iterator[None]:
             conn.commit()
 
 
-def run_silver() -> dict:
-    return {"silver": bronze_to_silver.run()}
+# Fingerprint of the bronze + core rows the last silver run of THIS process was built from
+# (bronze_to_silver.source_fingerprint). Only the pm2 loop uses it to skip unchanged runs; a manual
+# `pipeline` run and the Box builder's recompute always run in full.
+_last_silver_source: tuple | None = None
+
+
+def run_silver(skip_unchanged: bool = False) -> dict:
+    """bronze -> silver. With `skip_unchanged`, nothing is done when no bronze row was added and no
+    core row silver depends on changed since this process's last silver run (build 15)."""
+    global _last_silver_source
+    source = bronze_to_silver.source_fingerprint()
+    if skip_unchanged and source == _last_silver_source:
+        logger.info("silver: skipped — no new bronze rows and no core changes since the last run")
+        return {"silver": {}}
+    result = {"silver": bronze_to_silver.run()}
+    _last_silver_source = source
+    return result
 
 
 def run_gold() -> dict:
     return {"gold": silver_to_gold.run()}
 
 
-def run_all() -> dict:
-    return {**run_silver(), **run_gold()}
+def run_all(skip_unchanged: bool = False) -> dict:
+    return {**run_silver(skip_unchanged), **run_gold()}
 
 
-def run_stage(stage: str) -> dict:
-    """stage ∈ {'silver', 'gold', 'all'}. Serialized across processes via pipeline_lock()."""
-    runners = {"silver": run_silver, "gold": run_gold, "all": run_all}
+def run_stage(stage: str, skip_unchanged: bool = False) -> dict:
+    """stage ∈ {'silver', 'gold', 'all'}. Serialized across processes via pipeline_lock().
+    `skip_unchanged` (the pm2 loop): skip the silver step when its sources did not change."""
+    runners = {"silver": lambda: run_silver(skip_unchanged), "gold": run_gold,
+               "all": lambda: run_all(skip_unchanged)}
     if stage not in runners:
         raise ValueError(f"unknown stage {stage!r} (expected silver|gold|all)")
     with pipeline_lock():
@@ -63,8 +80,8 @@ def run_loop(stage: str = "all") -> None:
 
     interval = get_settings().pipeline_interval_seconds
     scheduler = BlockingScheduler(timezone="UTC")
-    scheduler.add_job(lambda: run_stage(stage), "interval", seconds=interval, id="pipeline",
-                      max_instances=1, coalesce=True)
+    scheduler.add_job(lambda: run_stage(stage, skip_unchanged=True), "interval", seconds=interval,
+                      id="pipeline", max_instances=1, coalesce=True)
     logger.info("pipeline scheduler started — stage=%s every %d seconds", stage, interval)
-    run_stage(stage)  # run immediately, then on the interval
+    run_stage(stage, skip_unchanged=True)  # run immediately (always: nothing remembered yet)
     scheduler.start()

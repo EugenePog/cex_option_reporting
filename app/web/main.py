@@ -107,8 +107,9 @@ def box_builder_page(request: Request):
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request):
-    """Admin-only tab: settings — a list on the left, the selected editor on the right. First one:
-    Telegram notifications (core.notification_setting)."""
+    """Admin-only tab: settings — a list on the left, the selected editor on the right:
+    Position hedged (core.hedged_position, build 16) and Telegram notifications
+    (core.notification_setting)."""
     user = get_optional_user(request)
     if user is None:
         return RedirectResponse("/login", status_code=303)

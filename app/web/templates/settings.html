@@ -9,14 +9,44 @@
 <div class="st-layout">
   <!-- left: the list of settings — each item opens its editor on the right -->
   <nav class="card st-nav" id="st-nav" aria-label="Settings">
-    <button type="button" class="st-item on" data-panel="telegram">
+    <button type="button" class="st-item on" data-panel="hedged">
+      <span class="st-ico" aria-hidden="true">⚖︎</span>
+      <span><b>Position hedged</b></span>
+    </button>
+    <button type="button" class="st-item" data-panel="telegram">
       <span class="st-ico" aria-hidden="true">✈︎</span>
       <span><b>Telegram notifications</b></span>
     </button>
   </nav>
 
   <!-- right: the selected setting -->
-  <section class="card st-main" id="panel-telegram">
+  <!-- build 16: the hedged amount Q per account × asset (core.hedged_position) -->
+  <section class="card st-main" id="panel-hedged">
+    <div class="st-ph">
+      <h2>Position hedged</h2>
+    </div>
+    <p class="hint">How much of each asset the account's options hedge (Q). The future-PnL profile
+      of graph ① compares Q hedged by the options with the same Q without them. Empty = not set.
+      <b>Balance now</b> is the exchange's balance of the asset (equity, incl. the options' PnL) —
+      for reference only.</p>
+
+    <div class="st-tablewrap">
+      <table class="st-table hp-table" id="hp-table">
+        <thead><tr>
+          <th>Account</th>
+          <th>Asset</th>
+          <th class="num" title="Latest balance snapshot of the asset in the account (OKX eq)">Balance now</th>
+          <th title="Hedged amount Q, in the asset">Hedged (Q)</th>
+          <th>Note</th>
+          <th title="Last change of Q">Updated</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="hp-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card st-main" id="panel-telegram" hidden>
     <div class="st-ph">
       <h2>Telegram notifications</h2>
       <span class="spacer"></span>

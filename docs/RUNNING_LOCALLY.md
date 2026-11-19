@@ -404,6 +404,29 @@ pm2 restart pipeline   # nothing else — same tables, same results
   (or `silver: skipped — no new bronze rows …`). Measured on 67k positions / 160k bronze rows:
   **158 s → 3–4 s**, silver identical row for row, and a second run changes 0 rows.
 
+### 10k. Settings → Position hedged (build 16, migration 0025)
+
+```bash
+make migrate          # 0025: core.hedged_position (empty)
+pm2 restart web       # Settings shows "Position hedged" above Telegram notifications
+```
+
+- **What it is:** the hedged amount **Q** per account and asset — how much of the asset (e.g. BTC)
+  the account's options hedge. It is for the future-PnL profile planned next to graph ① (Q hedged by
+  the options vs. the same Q without them); nothing draws it yet.
+- **Where:** admin **Settings → Position hedged**. One row per account × asset — the assets the
+  account has (or had) a balance in, the same list as graph ②b's asset selector. Type Q, then
+  **Save** (or Enter); **Clear** (two clicks) removes it. Empty = not set; 0 is a value.
+- **Balance now** is the account's latest balance snapshot of the asset, shown for reference only:
+  OKX's balance (`eq`) on an options account includes the options' own PnL, so it is not the amount
+  held — that is why Q is typed in.
+- **Seeding (optional):** `seed/<env>/hedged_position.csv` (columns `cex_code, account_label,
+  subacct_name, ccy, qty, note`; template in `seed/examples/`). `make seed` writes the CSV values
+  over values typed in Settings for the same account + asset, and `seed --replace` empties the table
+  (it references `core.subaccount`) — keep values you want to survive a replace in the CSV.
+- Check: `psql "$DATABASE_URL" -c "select * from core.hedged_position order by subaccount_id, ccy;"`;
+  changes are in `core.audit_log` (`settings.hedged.*`).
+
 ---
 
 ## Running everything as services (pm2)

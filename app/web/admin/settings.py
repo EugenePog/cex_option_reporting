@@ -2,6 +2,17 @@
 
 The tab has a list of settings on the left; each opens an editor on the right. Built so far:
 
+  Position hedged (build 16) — core.hedged_position (migration 0025): the hedged amount Q per
+  account × asset, for the future-PnL profile of graph ①:
+    GET    /hedged-positions                    one row per account × asset (+ saved rows)
+    PUT    /hedged-positions/{subaccount}/{ccy} set Q (and the note) — adds or updates the row
+    DELETE /hedged-positions/{subaccount}/{ccy} clear Q (deletes the row)
+
+  Rules (app.domain.hedge + the table's constraints): Q is a number ≥ 0; the asset must be one the
+  account has (or had) a balance in — gold.asset_balance_timeseries, the same rule as the asset
+  selector of graph ②b — or already have a saved row; note ≤ 500 characters. The current balance
+  is shown next to Q as a reference only (OKX `eq` includes the options' own PnL).
+
   Telegram notifications — core.notification_setting (migration 0022), read by the alerts worker on
   every check (no restart needed):
     GET    /notifications          rows + the allowed assets and codes
@@ -24,14 +35,24 @@ The tab has a list of settings on the left; each opens an editor on the right. B
 """
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.db.base import SessionLocal
-from app.db.models_core import NOTIFICATION_CODES, AuditLog, NotificationSetting, Subaccount
+from app.db.models_core import (
+    NOTIFICATION_CODES,
+    AuditLog,
+    HedgedPosition,
+    NotificationSetting,
+    Subaccount,
+)
+from app.db.models_gold import AssetBalanceTimeseries
 from app.domain.alerts import CODE_INFO, THRESHOLD_MAX, THRESHOLD_MIN
-from app.web.accounts import account_underlyings
+from app.domain.hedge import HedgeInputError, clean_ccy, clean_note, clean_qty, hedge_grid
+from app.web.accounts import account_options, account_underlyings
 from app.web.deps import CurrentUser, require_admin
 
 router = APIRouter(prefix="/api/admin/settings", tags=["admin-settings"])
@@ -146,3 +167,113 @@ def delete_notification(setting_id: int, user: CurrentUser = Depends(require_adm
         out = _row(r)
         s.delete(r)
         return out
+
+
+# --------------------------------------------------------------------------- Position hedged
+class HedgedIn(BaseModel):
+    qty: Any = None                 # checked by clean_qty (a number ≥ 0)
+    note: str | None = None
+
+
+def _asset_balances(s, sub_id: int | None = None) -> dict[tuple[int, str], dict]:
+    """{(subaccount_id, ccy): {balance, at, current}} — every asset the account has (or had) a
+    balance in, with its amount in the account's latest snapshot (0 when it isn't in it)."""
+    A = AssetBalanceTimeseries
+    last_q = select(A.subaccount_id, func.max(A.captured_at)).group_by(A.subaccount_id)
+    per_q = (select(A.subaccount_id, A.ccy, A.amount, A.captured_at)
+             .where(A.ccy.isnot(None))
+             .distinct(A.subaccount_id, A.ccy)
+             .order_by(A.subaccount_id, A.ccy, A.captured_at.desc()))
+    if sub_id is not None:
+        last_q = last_q.where(A.subaccount_id == sub_id)
+        per_q = per_q.where(A.subaccount_id == sub_id)
+    last = dict(s.execute(last_q).all())
+    out = {}
+    for sid, ccy, amount, at in s.execute(per_q).all():
+        current = at == last.get(sid)
+        out[(sid, ccy.upper())] = {"balance": (float(amount) if amount is not None else None)
+                                   if current else 0.0,
+                                   "at": last.get(sid), "current": current}
+    return out
+
+
+def _saved(rows) -> dict[tuple[int, str], dict]:
+    return {(r.subaccount_id, r.ccy): {"id": r.id, "qty": r.qty, "note": r.note,
+                                       "updated_at": r.updated_at} for r in rows}
+
+
+def _hedged_row(s, r: HedgedPosition | None, sub_id: int, ccy: str) -> dict:
+    """The editor row of one account × asset, after a change."""
+    rows = hedge_grid(account_options(s, [sub_id]), _asset_balances(s, sub_id),
+                      _saved([r] if r is not None else []))
+    return next((x for x in rows if x["ccy"] == ccy), {"subaccount_id": sub_id, "ccy": ccy,
+                                                       "id": None, "qty": None})
+
+
+def _hedged_audit(s, user_id: int, action: str, r: HedgedPosition) -> None:
+    s.add(AuditLog(actor_user_id=user_id, action=action, target=(
+        f"hedged_position={r.id} subaccount={r.subaccount_id} {r.ccy} "
+        f"qty={float(r.qty):g}")[:255]))
+
+
+def _hedged_key(s, subaccount_id: int, ccy: str) -> str:
+    """Checked asset code of an existing account — or HTTPException (404 / 422)."""
+    if s.get(Subaccount, subaccount_id) is None:
+        raise HTTPException(404, "Unknown account")
+    try:
+        return clean_ccy(ccy)
+    except HedgeInputError as e:
+        raise HTTPException(422, str(e)) from None
+
+
+@router.get("/hedged-positions")
+def list_hedged_positions(user: CurrentUser = Depends(require_admin)) -> dict:
+    with SessionLocal() as s:
+        accounts = account_options(s)
+        rows = hedge_grid(accounts, _asset_balances(s),
+                          _saved(s.execute(select(HedgedPosition)).scalars().all()))
+    return {"rows": rows, "accounts": [{"id": a["id"], "label": a["label"]} for a in accounts]}
+
+
+@router.put("/hedged-positions/{subaccount_id}/{ccy}")
+def set_hedged_position(subaccount_id: int, ccy: str, body: HedgedIn,
+                        user: CurrentUser = Depends(require_admin)) -> dict:
+    with SessionLocal() as s, s.begin():
+        ccy = _hedged_key(s, subaccount_id, ccy)
+        try:
+            qty, note = clean_qty(body.qty), clean_note(body.note)
+        except HedgeInputError as e:
+            raise HTTPException(422, str(e)) from None
+        r = s.execute(select(HedgedPosition).where(
+            HedgedPosition.subaccount_id == subaccount_id, HedgedPosition.ccy == ccy)
+        ).scalar_one_or_none()
+        if r is None:
+            if (subaccount_id, ccy) not in _asset_balances(s, subaccount_id):
+                raise HTTPException(422, f"The account has no {ccy} balance — pick one of its "
+                                         "assets")
+            r = HedgedPosition(subaccount_id=subaccount_id, ccy=ccy, qty=qty, note=note)
+            s.add(r)
+            action = "settings.hedged.create"
+        else:
+            r.qty, r.note, r.updated_at = qty, note, func.now()
+            action = "settings.hedged.update"
+        s.flush()
+        s.refresh(r)
+        _hedged_audit(s, user.id, action, r)
+        return _hedged_row(s, r, subaccount_id, ccy)
+
+
+@router.delete("/hedged-positions/{subaccount_id}/{ccy}")
+def clear_hedged_position(subaccount_id: int, ccy: str,
+                          user: CurrentUser = Depends(require_admin)) -> dict:
+    with SessionLocal() as s, s.begin():
+        ccy = _hedged_key(s, subaccount_id, ccy)
+        r = s.execute(select(HedgedPosition).where(
+            HedgedPosition.subaccount_id == subaccount_id, HedgedPosition.ccy == ccy)
+        ).scalar_one_or_none()
+        if r is None:
+            raise HTTPException(404, f"No hedged {ccy} amount set for this account")
+        _hedged_audit(s, user.id, "settings.hedged.delete", r)
+        s.delete(r)
+        s.flush()
+        return _hedged_row(s, None, subaccount_id, ccy)

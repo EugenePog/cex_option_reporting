@@ -16,7 +16,7 @@ seed/
   dev/        rows of the dev environment    — user, cex_account, subaccount, strategy, strategy_rule
   test/       rows of the test environment   — (same tables)
   prod/       rows of production             — empty for now (see prod/README.md)
-  examples/   templates for all seven tables (not loaded)
+  examples/   templates for all eight tables (not loaded)
 ```
 
 `make seed` loads `common/` and then the environment's folder. The environment is `APP_ENV` in
@@ -59,9 +59,11 @@ the error names the file and line.
 | `strategy_rule.csv` | sub-account + box + `match_json` | `cex_code`, `account_label`, `subacct_name`, `strategy_key` |
 | `contract_size.csv` | `cex_code` + `inst_type` + `underlying` | – |
 | `notification_setting.csv` | `asset` + `code` | – |
+| `hedged_position.csv` (build 16) | sub-account + `ccy` | `cex_code`, `account_label`, `subacct_name` |
 
 - **Load order / dependencies:** `user` → `cex_account` → `subaccount` → `strategy` → `strategy_rule`;
-  `contract_size` and `notification_setting` have no dependencies. A parent must be in the database
+  `contract_size` and `notification_setting` have no dependencies; `hedged_position` (build 16)
+  needs its sub-account. A parent must be in the database
   already or earlier in the same load (its own CSV).
 - **Only the columns a file has are written** — e.g. leave `send_notifications` out of
   `strategy.csv` to keep what the Box builder's ✎ dialog set.
@@ -94,7 +96,9 @@ the error names the file and line.
   `--wipe-links` if you really want to drop them.
 - **Settings tab rows** (`notification_setting`): a change made in the admin **Settings → Telegram
   notifications** editor is overwritten by the next `make seed` if the CSV still has the old values
-  for that asset + code — change it there too.
+  for that asset + code — change it there too. The same holds for **Settings → Position hedged**
+  (`hedged_position`, build 16) and its account + asset. `--replace` empties `hedged_position`
+  (it references `core.subaccount`): only the rows in the CSV come back.
 - `cex_account` credential columns are not in the CSVs — the collector reads `<LABEL>_*` from
   `.env`. Do **not** put API keys in these files (they're in git).
 - `seed/*.csv` directly in `seed/` (the old place) are no longer loaded; the loader warns about them.
@@ -181,6 +185,16 @@ DB takes effect within a minute — no restart. An asset without rows gets no al
 
 The migration already inserts the six BTC-USD rows (all on; a, b, e critical; X = Y = 2; N = 1), so
 seeding this file is only needed to change them or add assets (e.g. six more rows for `ETH-USD`).
+
+**`hedged_position`** — hedged amount Q per account × asset, for the future-PnL profile of graph ①
+(build 16, migration 0025; edited in **Settings → Position hedged**)
+
+| column | allowed values |
+|---|---|
+| `cex_code`, `account_label`, `subacct_name` | the sub-account (as in `subaccount.csv`; empty `subacct_name` = the main account) — with `ccy` the **key** |
+| `ccy` | the asset as in the balances (`gold.asset_balance_timeseries.ccy`), e.g. `BTC`; stored upper-case |
+| `qty` | hedged amount in `ccy`, a number ≥ 0 (no row = not set) |
+| `note` | free text |
 
 ### `strategy_rule.match_json` vocabulary
 

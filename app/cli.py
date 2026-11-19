@@ -41,7 +41,8 @@ def seed(
         False, help="With --replace: allow deleting the Box builder's manual strategy links."),
 ) -> None:
     """Load core/settings CSVs (user, cex_account, subaccount, strategy, strategy_rule,
-    contract_size, notification_setting) into the DB — seed/common, then seed/<env>.
+    contract_size, notification_setting, hedged_position) into the DB — seed/common, then
+    seed/<env>.
     build 11: rows are matched on their natural keys (no ids in the CSVs)."""
     setup_logging()
     from app.db.seed_loader import SeedError, SeedReplaceWouldWipeLinks, load_seed

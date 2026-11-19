@@ -208,8 +208,13 @@ def exposure_segments(legs: list[Leg], now: datetime) -> list[Segment]:
     return segs
 
 
-BARS = ("1h", "4h", "1d")
-BAR_STEP = {"1h": timedelta(hours=1), "4h": timedelta(hours=4), "1d": timedelta(days=1)}
+# Candle sizes of graph ①, all on fixed UTC boundaries. build 14: "1do" = the OPTION DAY, 08:00 →
+# 07:59 UTC next day (OKX options expire at 08:00 UTC); "1d" is the calendar day, 00:00 → 23:59 UTC.
+BARS = ("1h", "4h", "1d", "1do")
+BAR_STEP = {"1h": timedelta(hours=1), "4h": timedelta(hours=4), "1d": timedelta(days=1),
+            "1do": timedelta(days=1)}
+# where a size's bars start, counted from 00:00 UTC (the pipeline's date_bin origin)
+BAR_OFFSET = {"1h": timedelta(0), "4h": timedelta(0), "1d": timedelta(0), "1do": timedelta(hours=8)}
 # Auto candle size by the visible range: (bar, longest range in days it is used for); longer → 1d.
 # build 9: also sent to the browser (/api/price-boxes "auto_bars"), so graph ① switches candles
 # with the zoom by the same rule.

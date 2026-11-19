@@ -399,7 +399,8 @@ class IndexCandle(Base):
     """Grain: (cex_code, inst_id, bar, ts) — index candles (e.g. BTC-USD) for the price chart.
     Added in 0021.
 
-    Bars '1h', '4h', '1d' on UTC boundaries (4h = 00/04/08/12/16/20 UTC), aggregated from the
+    Bars '1h', '4h', '1d', '1do' on UTC boundaries (4h = 00/04/08/12/16/20 UTC; 1d = calendar day
+    00:00 UTC; build 14: 1do = option day from 08:00 UTC, when OKX options expire), aggregated from the
     1-minute silver.index_candle: open = first minute, close = last, high / low = max / min.
     `n_minutes` < bar length marks the still-forming last bar (or a gap). Updated incrementally:
     `src_max_id` is the highest silver id in the bar, so max(src_max_id) is the watermark and a
@@ -412,7 +413,7 @@ class IndexCandle(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     cex_code: Mapped[str] = mapped_column(String(16))
     inst_id: Mapped[str] = mapped_column(String(32))
-    bar: Mapped[str] = mapped_column(String(8))                 # '1h' | '4h' | '1d'
+    bar: Mapped[str] = mapped_column(String(8))                 # '1h' | '4h' | '1d' | '1do'
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))   # bar open time (UTC)
     open: Mapped[float] = mapped_column(Numeric)
     high: Mapped[float] = mapped_column(Numeric)

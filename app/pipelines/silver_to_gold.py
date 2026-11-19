@@ -4,8 +4,8 @@ Gold is fully derived and **rebuilt** each run (truncate + insert) — simplest 
 consistent at this scale. Reads only silver + core; never touches bronze.
 
 Exception: gold.index_candle (index price bars for the "Price with strategy boxes" chart) is market
-data that only grows, so it is updated incrementally — each run recomputes only the 1h / 4h / 1d
-bars that received new 1-minute candles in silver (see _build_index_candles).
+data that only grows, so it is updated incrementally — each run recomputes only the 1h / 4h / 1d /
+1do bars that received new 1-minute candles in silver (see _build_index_candles).
 
 Definitions:
   * A "deal" = one silver.closed_position (realized, incl. expiry). realized_pnl is in the account
@@ -49,7 +49,7 @@ from app.db.models_silver import (
     PositionLeg,
     PositionSnapshot,
 )
-from app.domain.boxes import BAR_STEP, BARS, Leg, build_boxes
+from app.domain.boxes import BAR_OFFSET, BAR_STEP, BARS, Leg, build_boxes
 from app.domain.contracts import ContractSizes, inst_type_of
 from app.domain.instruments import expires_at
 from app.domain.metrics import deal_metrics, equity_metrics
@@ -427,16 +427,18 @@ def _build_box_shape(s, legs: list[Leg], now: datetime) -> int:
     return len(boxes)
 
 
-_PG_INTERVAL = {"1h": "1 hour", "4h": "4 hours", "1d": "1 day"}
-assert set(_PG_INTERVAL) == set(BARS) == set(BAR_STEP)
+_PG_INTERVAL = {"1h": "1 hour", "4h": "4 hours", "1d": "1 day", "1do": "1 day"}
+assert set(_PG_INTERVAL) == set(BARS) == set(BAR_STEP) == set(BAR_OFFSET)
+_ORIGIN = datetime(2000, 1, 1, tzinfo=timezone.utc)   # date_bin origin + BAR_OFFSET per size
 
 
 def _build_index_candles(s) -> int:
-    """silver.index_candle (1m) → gold.index_candle (1h / 4h / 1d), incrementally.
+    """silver.index_candle (1m) → gold.index_candle (1h / 4h / 1d / 1do), incrementally.
 
     Per bar size: watermark = max(src_max_id) already in gold; the bars ("buckets", UTC
     boundaries via date_bin) that contain a silver minute with a higher id are recomputed in full
-    from silver and upserted. A first run (empty gold) builds everything. Returns bars written."""
+    from silver and upserted. A first run (empty gold) builds everything — also for a size added
+    later (build 14: 1do, the option day 08:00 → 07:59 UTC: origin 08:00). Returns bars written."""
     total = 0
     for bar in BARS:
         total += s.execute(text("""
@@ -444,8 +446,7 @@ def _build_index_candles(s) -> int:
                 SELECT COALESCE(MAX(src_max_id), 0) AS id FROM gold.index_candle WHERE bar = :bar
             ), touched AS (
                 SELECT DISTINCT c.cex_code, c.inst_id,
-                       date_bin(CAST(:step AS interval), c.ts,
-                                TIMESTAMPTZ '2000-01-01 00:00:00+00') AS b
+                       date_bin(CAST(:step AS interval), c.ts, CAST(:origin AS timestamptz)) AS b
                   FROM silver.index_candle c, wm
                  WHERE c.id > wm.id AND c.bar = '1m'
             ), agg AS (
@@ -471,7 +472,7 @@ def _build_index_candles(s) -> int:
                SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
                    close = EXCLUDED.close, n_minutes = EXCLUDED.n_minutes,
                    src_max_id = EXCLUDED.src_max_id, updated_at = EXCLUDED.updated_at
-        """), {"bar": bar, "step": _PG_INTERVAL[bar]}).rowcount
+        """), {"bar": bar, "step": _PG_INTERVAL[bar], "origin": _ORIGIN + BAR_OFFSET[bar]}).rowcount
     return total
 
 

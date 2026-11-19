@@ -41,7 +41,8 @@
       <select id="pb-bar" style="min-width:90px">
         <option value="1h">1H</option>
         <option value="4h">4H</option>
-        <option value="1d" selected>1D</option>
+        <option value="1d">1D (calendar)</option>
+        <option value="1do" selected>1D (option)</option>
       </select>
       <span id="pb-bar-range" class="bar-range"></span></span>
     </div>
@@ -499,7 +500,7 @@ async function renderPriceBoxes(){
 // --- ① navigation (build 9): fit, labels and more candles while you move ------------------------
 // ChartNav (static/chartnav.js) does the mouse / trackpad part; this is what graph ① adds to it.
 const PB = {gen: 0, cd: {t: [], x: [], o: [], h: [], l: [], c: []}};
-const BAR_MS = {"1h": 36e5, "4h": 144e5, "1d": 864e5};
+const BAR_MS = {"1h": 36e5, "4h": 144e5, "1d": 864e5, "1do": 864e5};
 const PB_VIEW_BARS = 2000;      // zooming out stops at this many candles on screen
 const PB_KEEP = 6000;           // candles kept in the chart at most (far ones are dropped)
 const msPlot = ms => new Date(ms).toISOString().slice(0, 23).replace("T", " ");   // UTC-naive
@@ -508,16 +509,20 @@ const PB_BAR_RANGES = {
   "1h": ["HH:00–HH:59"],
   "4h": ["00:00–03:59", "04:00–07:59", "08:00–11:59", "12:00–15:59", "16:00–19:59", "20:00–23:59"],
   "1d": ["00:00–23:59"],
+  "1do": ["08:00–07:59"],                       // build 14: the option day (OKX expiries at 08:00 UTC)
 };
+const PB_BAR_LABEL = {"1h": "1H", "4h": "4H", "1d": "1D (calendar)", "1do": "1D (option)"};
+const PB_BAR_NOTE = {"1do": " · next day"};
 function pbShowRange(){
   const bar = document.getElementById("pb-bar").value, el = document.getElementById("pb-bar-range");
   const r = PB_BAR_RANGES[bar] || [];
   el.innerHTML = r.length > 1                  // 4H: six windows as a compact 3 × 2 grid, UTC once
     ? `<span class="br-grid">${r.map(x => `<span>${x}</span>`).join("")}</span><span>UTC</span>`
-    : `<span>${r[0] || ""} UTC</span>`;
-  el.title = `Each ${bar.toUpperCase()} candle covers ${r.map(x => x + " UTC").join(", ")}`;
+    : `<span>${r[0] || ""} UTC${PB_BAR_NOTE[bar] || ""}</span>`;
+  el.title = `Each ${PB_BAR_LABEL[bar] || bar.toUpperCase()} candle covers ${r.map(x => x + " UTC").join(", ")}` +
+    (bar === "1do" ? " the next day — the option day (OKX options expire at 08:00 UTC)" : "");
 }
-const pbBarText = (bar, auto) => `${String(bar).toUpperCase()} candles${auto ? " (auto)" : ""}`;
+const pbBarText = (bar, auto) => `${PB_BAR_LABEL[bar] || String(bar).toUpperCase()} candles${auto ? " (auto)" : ""}`;
 function pbAutoBar(span){                      // same rule as the server (AUTO_BAR_MAX_DAYS)
   for (const r of PB.autoBars) if (span / 864e5 <= r.max_days) return r.bar;
   return "1d";

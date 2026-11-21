@@ -1,7 +1,16 @@
 """Silver -> Gold transform.
 
-Gold is fully derived and **rebuilt** each run (truncate + insert) — simplest and always
-consistent at this scale. Reads only silver + core; never touches bronze.
+Gold is fully derived and **rebuilt** each run (delete + insert, one transaction) — simplest and
+always consistent at this scale. Reads only silver + core; never touches bronze.
+
+Build 20 — no off-time for readers: the old rows are removed with DELETE, not TRUNCATE. TRUNCATE
+takes an ACCESS EXCLUSIVE lock held until the commit, so every page, API call and the alerts worker
+reading gold waited for the whole rebuild (and a slow report query in flight held the rebuild — and
+everything queued behind it — up). DELETE only takes ROW EXCLUSIVE, which readers don't conflict
+with: until this run commits they keep seeing the previous gold in full (MVCC), then the new gold
+appears all at once. Never empty, never half-built. Costs: the old rows become dead tuples that
+autovacuum removes, and the surrogate `id`s keep counting up instead of restarting at 1 (bigint;
+nothing relies on them — TRUNCATE … RESTART IDENTITY renumbered them on every run anyway).
 
 Exception: gold.index_candle (index price bars for the "Price with strategy boxes" chart) is market
 data that only grows, so it is updated incrementally — each run recomputes only the 1h / 4h / 1d /
@@ -56,7 +65,7 @@ from app.domain.metrics import deal_metrics, equity_metrics
 
 logger = logging.getLogger(__name__)
 
-_GOLD_TABLES = [  # truncated in this order at the start of each rebuild
+_GOLD_TABLES = [  # emptied (DELETE, build 20) in this order at the start of each rebuild
     "balance_timeseries", "asset_balance_timeseries", "pnl_daily", "asset_pnl_daily",
     "strategy_summary", "deal_ledger", "position_current", "underlying_price",
     "expiry_settlement", "greeks_by_expiry", "client_pnl_daily", "client_performance",
@@ -94,9 +103,10 @@ def run() -> dict[str, int]:
             .join(CexAccount, CexAccount.id == Subaccount.cex_account_id)
         ).all())
 
-        # Truncate gold (rebuild). RESTART IDENTITY resets the surrogate ids.
-        s.execute(text("TRUNCATE " + ", ".join(f"gold.{t}" for t in _GOLD_TABLES)
-                       + " RESTART IDENTITY"))
+        # Empty gold for the rebuild (build 20: DELETE, not TRUNCATE — readers keep seeing the
+        # previous gold until this transaction commits instead of waiting for it; see the docstring)
+        for t in _GOLD_TABLES:
+            s.execute(text(f"DELETE FROM gold.{t}"))
 
         rates = _CoinUsd(s)  # coin→USD conversion for USD-denominated gold columns
         counts["balance_timeseries"] = _build_balance_ts(s)

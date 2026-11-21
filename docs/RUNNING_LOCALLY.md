@@ -494,6 +494,24 @@ pm2 restart web
   1-minute index candle, timed at the END of that minute (the time the price is from). With
   snapshots every minute it is at most ~1 minute + one pipeline interval old.
 
+### 10o. Gold rebuild without off-time (build 20, no migration)
+
+```bash
+pm2 restart pipeline   # web / worker need nothing
+```
+
+- Gold is still rebuilt in full on every run, in one transaction — but the old rows are now removed
+  with `DELETE` instead of `TRUNCATE`. Pages, API calls and the alerts worker no longer wait for the
+  rebuild: until it commits they read the previous gold in full, then the new gold appears all at
+  once (never empty, never half-built). A slow report query no longer holds the rebuild up either.
+- Gold `id`s keep counting up instead of restarting at 1 each run (nothing uses them).
+- The old rows become dead rows that autovacuum removes; gold tables settle at about twice their
+  live size. Check: `select relname, n_live_tup, n_dead_tup, last_autovacuum from
+  pg_stat_user_tables where schemaname = 'gold' order by n_dead_tup desc;`
+- To confirm nothing waits on gold any more, run this during a gold run — it should return no rows:
+  `select pid, now() - query_start, wait_event, left(query, 60) from pg_stat_activity
+  where wait_event_type = 'Lock' and query ilike '%gold.%';`
+
 ---
 
 ## Running everything as services (pm2)

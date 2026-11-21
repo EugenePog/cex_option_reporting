@@ -25,9 +25,13 @@
     <div class="st-ph">
       <h2>Position hedged</h2>
     </div>
-    <p class="hint">How much of each asset the account's options hedge (Q). The future-PnL profile
-      of graph ① compares Q hedged by the options with the same Q without them. Empty = not set.
-      <b>Balance now</b> is the exchange's balance of the asset (equity, incl. the options' PnL) —
+    <p class="hint">How much of each asset the account's options hedge (Q) — the coin held besides the
+      options. The future-PnL profile of graph ① compares Q hedged by the options with the same Q without
+      them. Empty = not set.
+      <b>Don't include option cash in Q:</b> premiums received / paid, fees and realized option PnL are added
+      by graph ① itself (switches <i>Premiums &amp; fees</i> and <i>Realized</i>), so counting them here too
+      would count them twice.
+      <b>Balance now</b> is the exchange's balance of the asset (equity, incl. the options' PnL and cash) —
       for reference only.</p>
 
     <div class="st-tablewrap">

@@ -458,8 +458,107 @@ python -m app.cli worker --dry-run    # optional: what would be sent now
   has notification settings; `seed/common/notification_setting.csv` has them for BTC-USD.
 - Not covered by g / h: the worker process itself being down (it can't report that) — keep an eye on
   `pm2 status`, or add an external uptime check.
+
+### 10m. One account at a time + graph ① future-PnL panel (build 18, no migration)
+
+```bash
+pm2 restart web
+```
+
+- **Account selector** (Dashboard, Analyze): no *All* any more — accounts sorted by name, the first
+  is the default. The Underlying / ②b asset (Dashboard) and Symbol / Strategy (Analyze) lists show
+  what that account has.
+- **Graph ①, right of the chart:** *PnL at expiry* if BTC ends at that price — the account's Q
+  (Settings → Position hedged, §10k) with the open options of the boxes **in the legend and
+  switched on** (a grey box drops out; the panel updates on every legend click), from the current
+  price, no premiums. Green / red = profit / loss with options; the band out to "BTC only" is dark green where
+  the options save, brown where they cost. White lines = open strikes. Hover = values in USD and
+  BTC; click = pin (click again or Esc to unpin). Drag / wheel inside the panel move / zoom the
+  prices only. Q not set → the panel shows the options alone ("Q not set").
 - Check: `select * from core.notification_feed_state;` (armed / sent per exchange × asset × code)
   and `scripts/check_alert.sql` for a box alert.
+
+### 10n. Auto-refresh + exact last-price time (build 19, no migration)
+
+```bash
+pm2 restart web
+```
+
+- **The Dashboard and the Analyze tab redraw themselves** every `PIPELINE_INTERVAL_SECONDS` (new data
+  can't arrive faster than the pipeline writes it); the subtitle shows "Updates every 5 min · last
+  HH:MM". Not while the browser tab is in the background (it catches up when you come back) and not
+  in the middle of a drag. Your zoom, the values scale, boxes switched off in graph ①'s legend, a
+  pinned PnL read-out, the payoff expiry and an open deals list all stay. Change the cadence with
+  `PIPELINE_INTERVAL_SECONDS` and restart `pipeline` and `web`.
+- **Last price** (label on graph ①, start of the PnL panel): the close of the newest stored
+  1-minute index candle, timed at the END of that minute (the time the price is from). With
+  snapshots every minute it is at most ~1 minute + one pipeline interval old.
+
+### 10o. Gold rebuild without off-time (build 20, no migration)
+
+```bash
+pm2 restart pipeline   # web / worker need nothing
+```
+
+- Gold is still rebuilt in full on every run, in one transaction — but the old rows are now removed
+  with `DELETE` instead of `TRUNCATE`. Pages, API calls and the alerts worker no longer wait for the
+  rebuild: until it commits they read the previous gold in full, then the new gold appears all at
+  once (never empty, never half-built). A slow report query no longer holds the rebuild up either.
+- Gold `id`s keep counting up instead of restarting at 1 each run (nothing uses them).
+- The old rows become dead rows that autovacuum removes; gold tables settle at about twice their
+  live size. Check: `select relname, n_live_tup, n_dead_tup, last_autovacuum from
+  pg_stat_user_tables where schemaname = 'gold' order by n_dead_tup desc;`
+- To confirm nothing waits on gold any more, run this during a gold run — it should return no rows:
+  `select pid, now() - query_start, wait_event, left(query, 60) from pg_stat_activity
+  where wait_event_type = 'Lock' and query ilike '%gold.%';`
+
+### 10p. Premiums, fees and realized PnL in the PnL panel (build 21, migration 0027)
+
+**Nothing to re-collect.** The collectors store OKX's whole message in bronze, so the fields this
+build needs are already there for all history: positions `pnl` / `realizedPnl` (every snapshot) and
+fills `fillIdxPx`. Bronze is not touched; the pipeline reads them into new silver columns.
+
+1. Check what bronze holds (optional):
+
+   ```bash
+   docker exec -it cex_pg psql -U cex -d cex_option_reporting -c "
+   select count(*) rows, count(payload->>'realizedPnl') realized, count(payload->>'pnl') pnl
+     from bronze.raw_position;" -c "
+   select count(*) fills, count(payload->>'fillIdxPx') idx_px from bronze.raw_trade_fill;"
+   ```
+
+   Fills without `fillIdxPx` (if any) are priced from the 1-minute index candles instead.
+
+2. Upgrade:
+
+   ```bash
+   pm2 stop pipeline
+   make migrate          # 0027: 2 columns on silver.position_snapshot, 1 on silver.trade_fill,
+                         #       4 on gold.position_leg — adds columns, deletes nothing
+   make pipeline         # one-off: silver rewrites its existing snapshot / fill rows once to fill
+                         # the new columns (longer than a normal run), then gold computes the cash
+   pm2 restart pipeline web
+   ```
+
+3. Check the result:
+
+   ```bash
+   docker exec -it cex_pg psql -U cex -d cex_option_reporting -c "
+   select status, cash_source, count(*), round(sum(open_cash_usd)) open_usd,
+          round(sum(realized_cash_usd)) realized_usd, sum(cash_missing_px) unpriced
+     from gold.position_leg group by 1, 2 order by 1, 2;"
+   ```
+
+   `cash_source`: `fills` = from the trades (exact), `snapshots` = open legs replayed from position
+   snapshots (trades not all collected, e.g. opened before collection started, or the newest trade
+   not in yet — switches to `fills` after the next history run), `summary` = closed legs from
+   positions-history (whole fee at the closing price). `unpriced` should be 0.
+
+**On graph ①:** *Premiums & fees (open)* (on by default) and *Realized (closed)* (off by default) above the chart. Premiums
+on = open options counted from their entry with the premium received / paid and fees (so the V
+need not meet at today's price); Realized on = + realized PnL of options closed in the period. All
+in USD at the index price of each trade. The hover splits *Options* into *at expiry*, *premiums &
+fees (open)* and *realized in period*. Q (Settings → Position hedged) must not include option cash.
 
 ---
 

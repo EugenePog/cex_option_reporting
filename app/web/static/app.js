@@ -50,6 +50,31 @@ function linkX(topId, botId) {
   });
   mirror(top, bot); mirror(bot, top);
 }
+// build 19: redraw the open tab every `seconds` (the pipeline cadence, PIPELINE_INTERVAL_SECONDS —
+// new data can't arrive faster). Not while the tab is hidden (caught up as soon as it is visible
+// again) or while a chart is being dragged (retried a few seconds later); never two at once.
+// `el` shows the cadence and the time of the last refresh.
+function autoRefresh(seconds, run, el) {
+  const ms = Math.max(15, Number(seconds) || 300) * 1000;
+  let last = Date.now(), busy = false, timer = null;
+  const every = ms >= 60000 && ms % 60000 === 0 ? `${ms / 60000} min` : `${Math.round(ms / 1000)} s`;
+  const hhmm = t => new Date(t).toTimeString().slice(0, 5);
+  const label = () => { if (el) { el.textContent = `Updates every ${every} · last ${hhmm(last)}`;
+    el.title = "The page redraws at the pipeline cadence (PIPELINE_INTERVAL_SECONDS): zoom, legend and pinned values stay"; } };
+  const schedule = () => { clearTimeout(timer); timer = setTimeout(tick, Math.max(0, last + ms - Date.now())); };
+  async function tick() {
+    if (document.hidden || busy) return;                       // visibilitychange catches up
+    if (document.querySelector(".cn-host.cn-drag")) { clearTimeout(timer); timer = setTimeout(tick, 5000); return; }
+    busy = true;
+    try { await run(); } catch (e) { console.warn("auto-refresh", e); }
+    finally { busy = false; last = Date.now(); label(); schedule(); }
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && Date.now() - last >= ms) tick();
+  });
+  label(); schedule();
+  return {touch() { last = Date.now(); label(); schedule(); }};
+}
 function fillSelect(el, items, {value,label,blank}={}) {
   el.innerHTML = "";
   if (blank) el.appendChild(new Option(blank, ""));

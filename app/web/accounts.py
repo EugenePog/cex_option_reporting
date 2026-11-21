@@ -7,6 +7,10 @@ everywhere.
 
 `account_underlyings` (build 6) is the one list of underlyings the accounts actually have — used by
 the Dashboard / Analyze Underlying selector and the Settings → Telegram notifications asset list.
+
+build 18: the Dashboard and Analyze show ONE account at a time (no "All"). `sort_accounts` is the
+order of the Account selector — by name, case-insensitive — and `default_account_id` its first
+entry, used when a request names no account (or one the user can't see).
 """
 from __future__ import annotations
 
@@ -33,6 +37,20 @@ def account_options(s, ids: Iterable[int] | None = None) -> list[dict]:
         q = q.where(Subaccount.id.in_(list(ids)))
     return [{"id": sid, "label": account_label(label, disp, sub_name), "cex_code": cex}
             for sid, disp, sub_name, label, cex in s.execute(q).all()]
+
+
+def sort_accounts(options: list[dict]) -> list[dict]:
+    """Account selector order (build 18): by name, case-insensitive; ties by id."""
+    return sorted(options, key=lambda a: (a["label"].casefold(), a["id"]))
+
+
+def default_account_id(s, ids: Iterable[int]) -> int | None:
+    """The first account by name among `ids` (None when there are none) — the selector default and
+    the scope of a request that names no account."""
+    ids = list(ids)
+    if not ids:
+        return None
+    return sort_accounts(account_options(s, ids))[0]["id"]
 
 
 def account_labels(s, ids: Iterable[int]) -> dict[int, str]:

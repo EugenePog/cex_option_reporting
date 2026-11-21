@@ -3,7 +3,7 @@
 {% block nav_analyze %}active{% endblock %}
 {% block body %}
 <h1 class="page">Analyze</h1>
-<p class="sub">Every stat recomputes as filters change — one filter-driven view over all closed positions.</p>
+<p class="sub">Every stat recomputes as filters change — one filter-driven view over all closed positions. <span id="auto-refresh" class="muted"></span></p>
 
 <div class="filters">
   <div class="fld"><label>Symbol</label><select id="f-underlying"></select></div>
@@ -47,15 +47,38 @@
 <script>
 const state = { underlying:"", strategy:"", subaccount:"", period:"all" };
 
+// build 18: ONE account at a time (no "All accounts"; default = the first by name); the Symbol and
+// Strategy lists follow the chosen account (a selection the account doesn't have falls back to All).
+let FILTERS = null;
+function applyAccount(){
+  const f = FILTERS, ba = (f.by_account || {})[state.subaccount] || {};
+  const uls = ba.underlyings && ba.underlyings.length ? ba.underlyings : f.underlyings;
+  fillSelect(document.getElementById("f-underlying"), uls, {blank:"All symbols"});
+  if (!uls.includes(state.underlying)) state.underlying = "";
+  document.getElementById("f-underlying").value = state.underlying;
+  const sts = f.strategies.filter(x => String(x.subaccount_id) === state.subaccount);
+  fillSelect(document.getElementById("f-strategy"), sts, {value:"id",label:"name",blank:"All strategies"});
+  if (!sts.some(x => String(x.id) === state.strategy)) state.strategy = "";
+  document.getElementById("f-strategy").value = state.strategy;
+}
 async function boot(){
   const f = await api("/filters"); if(!f) return;
-  fillSelect(document.getElementById("f-underlying"), f.underlyings, {blank:"All symbols"});
-  fillSelect(document.getElementById("f-strategy"), f.strategies, {value:"id",label:"name",blank:"All strategies"});
-  fillSelect(document.getElementById("f-subaccount"), f.accounts.map(a=>({id:a.id,name:a.label})), {value:"id",label:"name",blank:"All accounts"});
+  FILTERS = f;
+  fillSelect(document.getElementById("f-subaccount"), f.accounts.map(a=>({id:a.id,name:a.label})), {value:"id",label:"name"});
+  state.subaccount = f.defaults && f.defaults.subaccount != null ? String(f.defaults.subaccount) : "";
+  document.getElementById("f-subaccount").value = state.subaccount;
+  applyAccount();
   for (const [id,key] of [["f-underlying","underlying"],["f-strategy","strategy"],["f-subaccount","subaccount"],["f-period","period"]])
-    document.getElementById(id).onchange = e => { state[key]=e.target.value; refresh(); };
+    document.getElementById(id).onchange = e => { state[key]=e.target.value; if (key === "subaccount") applyAccount(); refresh(); };
   refresh();
+  // build 19: redrawn at the pipeline cadence; an open deals list is reloaded too (no scrolling)
+  autoRefresh(f.refresh_seconds, async () => {
+    await refresh();
+    if (DEALS && document.getElementById("deals-card").style.display === "block")
+      await showDeals(DEALS.id, DEALS.name, true);
+  }, document.getElementById("auto-refresh"));
 }
+let DEALS = null;
 
 async function refresh(){
   const d = await api("/analyze", state); if(!d) return;
@@ -96,7 +119,8 @@ async function refresh(){
     showlegend:false, margin:{l:70,r:16,t:10,b:36} }), CFG);
 }
 
-async function showDeals(strategyId, name){
+async function showDeals(strategyId, name, quiet){
+  DEALS = {id: strategyId, name};
   const d = await api("/deals", {...state, strategy: strategyId}); if(!d) return;
   document.getElementById("deals-card").style.display="block";
   document.getElementById("deals-title").textContent = "· "+name;
@@ -109,7 +133,7 @@ async function showDeals(strategyId, name){
       <td class="${signCls(r.realized_pnl)}">${r.realized_pnl.toFixed(6)}</td><td>${r.hold_days??''}</td>`;
     tb.appendChild(tr);
   }
-  document.getElementById("deals-card").scrollIntoView({behavior:"smooth"});
+  if (!quiet) document.getElementById("deals-card").scrollIntoView({behavior:"smooth"});
 }
 boot();
 </script>

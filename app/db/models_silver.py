@@ -68,6 +68,10 @@ class PositionSnapshot(Base):
     fwd_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)      # forward price (opt-summary.fwdPx)
     upl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     fee: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # build 21 (0027): OKX positions `pnl` (closing trades' PnL, no fees) and `realizedPnl`
+    # (= pnl + fee + funding), coin, accumulated over the position's life
+    pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     notional_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # positions.notionalUsd
     opt_val: Mapped[float | None] = mapped_column(Numeric, nullable=True)       # positions.optVal
     # Coin greeks (per-contract) from opt-summary:
@@ -154,6 +158,7 @@ class TradeFill(Base):
     fee: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     fee_ccy: Mapped[str | None] = mapped_column(String(16), nullable=True)
     realized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    idx_px: Mapped[float | None] = mapped_column(Numeric, nullable=True)   # build 21: fillIdxPx (USD)
     trade_id: Mapped[str] = mapped_column(String(64), index=True)
     filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     ingest_id: Mapped[str] = mapped_column(String(36))

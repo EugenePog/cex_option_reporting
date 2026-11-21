@@ -200,11 +200,13 @@ def _read(session, model, fields: Sequence[str] = (), *, json_fields: Sequence[s
 
 
 _POS_FIELDS = ("posId", "cTime", "instId", "pos", "upl", "fee", "idxPx", "avgPx", "ccy", "markPx",
-               "notionalUsd", "optVal", "deltaBS", "gammaBS", "thetaBS", "vegaBS")
+               "notionalUsd", "optVal", "deltaBS", "gammaBS", "thetaBS", "vegaBS",
+               "pnl", "realizedPnl")                 # build 21: realized PnL of open positions
 _GREEK_FIELDS = ("instId", "markPx", "fwdPx", "delta", "gamma", "theta", "vega", "markVol")
 _CLOSED_FIELDS = ("cTime", "instId", "direction", "openMaxPos", "closeTotalPos", "openAvgPx",
                   "closeAvgPx", "uTime", "type", "realizedPnl", "pnl", "fee", "ccy")
-_FILL_FIELDS = ("ts", "fillTime", "instId", "side", "fillSz", "fillPx", "fee", "feeCcy", "fillPnl")
+_FILL_FIELDS = ("ts", "fillTime", "instId", "side", "fillSz", "fillPx", "fee", "feeCcy", "fillPnl",
+                "fillIdxPx")                         # build 21: index price at the trade
 _BILL_FIELDS = ("instId", "type", "subType", "px", "pnl", "fee", "ccy", "ts")
 _BAL_FIELDS = ("ccy", "eq", "availEq", "availBal", "eqUsd")
 _MARGIN_FIELDS = ("imr", "mmr", "mgnRatio", "totalEq", "ccy", "eqUsd")
@@ -562,6 +564,7 @@ def _transform_positions(session, lk: _Lookups, legs: dict[LegKey, _Leg],
             "mark_px": _f(pos.p_markPx or (g.p_markPx if g is not None else None)),
             "idx_px": _f(pos.p_idxPx), "fwd_px": _f(g.p_fwdPx if g is not None else None),
             "upl": _f(pos.p_upl), "fee": _f(pos.p_fee),
+            "pnl": _f(pos.p_pnl), "realized_pnl": _f(pos.p_realizedPnl),   # build 21
             "notional_usd": _f(pos.p_notionalUsd), "opt_val": _f(pos.p_optVal),
             # coin greeks (opt-summary) + Black-Scholes dollar greeks (positions)
             "delta": _f(g.p_delta if g is not None else None),
@@ -599,7 +602,7 @@ def _transform_fills(session, lk: _Lookups, legs: dict[LegKey, _Leg],
             "strike": parsed.strike, "expiry": parsed.expiry, "side": okx_side,
             "size": _f(f.p_fillSz), "price": _f(f.p_fillPx),
             "fee": _f(f.p_fee), "fee_ccy": f.p_feeCcy,
-            "realized_pnl": _f(f.p_fillPnl), "trade_id": f.trade_id,
+            "realized_pnl": _f(f.p_fillPnl), "idx_px": _f(f.p_fillIdxPx), "trade_id": f.trade_id,
             "filled_at": _ts(f.p_ts or f.p_fillTime), "ingest_id": f.ingest_id,
         })
     changed = _upsert_many(session, TradeFill, rows, ["cex_code", "inst_id", "trade_id"])

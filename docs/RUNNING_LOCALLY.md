@@ -458,6 +458,23 @@ python -m app.cli worker --dry-run    # optional: what would be sent now
   has notification settings; `seed/common/notification_setting.csv` has them for BTC-USD.
 - Not covered by g / h: the worker process itself being down (it can't report that) — keep an eye on
   `pm2 status`, or add an external uptime check.
+
+### 10m. One account at a time + graph ① future-PnL panel (build 18, no migration)
+
+```bash
+pm2 restart web
+```
+
+- **Account selector** (Dashboard, Analyze): no *All* any more — accounts sorted by name, the first
+  is the default. The Underlying / ②b asset (Dashboard) and Symbol / Strategy (Analyze) lists show
+  what that account has.
+- **Graph ①, right of the chart:** *PnL at expiry* if BTC ends at that price — the account's Q
+  (Settings → Position hedged, §10k) with the open options of the boxes **in the legend and
+  switched on** (a grey box drops out; the panel updates on every legend click), from the current
+  price, no premiums. Green / red = profit / loss with options; the band out to "BTC only" is dark green where
+  the options save, brown where they cost. White lines = open strikes. Hover = values in USD and
+  BTC; click = pin (click again or Esc to unpin). Drag / wheel inside the panel move / zoom the
+  prices only. Q not set → the panel shows the options alone ("Q not set").
 - Check: `select * from core.notification_feed_state;` (armed / sent per exchange × asset × code)
   and `scripts/check_alert.sql` for a box alert.
 

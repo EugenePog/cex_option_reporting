@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 
 from app.db.base import SessionLocal
 from app.db.contract_sizes import load_contract_sizes
-from app.db.models_core import Strategy, Subaccount
+from app.db.models_core import HedgedPosition, Strategy, Subaccount
 from app.db.models_gold import (
     AssetBalanceTimeseries,
     AssetPnlDaily,
@@ -45,10 +45,17 @@ from app.domain.boxes import (
     size_split,
     in_period,
 )
+from app.domain.hedge import OptionLeg, hedge_profile
 from app.domain.metrics import deal_metrics, equity_metrics
 from app.domain.instruments import OPTION_SETTLE_UTC as OKX_SETTLE_UTC  # 08:00 UTC on expiry day
 from app.domain.pricing import black76_price, payoff_intrinsic
-from app.web.accounts import account_labels, account_options, account_underlyings
+from app.web.accounts import (
+    account_labels,
+    account_options,
+    account_underlyings,
+    default_account_id,
+    sort_accounts,
+)
 from app.web.deps import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/api", tags=["reports"])
@@ -59,10 +66,14 @@ def _f(v) -> float:
 
 
 def _subs(user: CurrentUser, subaccount: int | None) -> list[int]:
-    """Effective subaccount scope: the user's subs, optionally narrowed to one they own."""
+    """Effective subaccount scope — build 18: always ONE account (the Dashboard and Analyze have no
+    "All" any more): the one asked for when the user can see it, otherwise the user's first account
+    by name (the selector's default). [] when the user has no account."""
     if subaccount is not None and subaccount in user.subaccount_ids:
         return [subaccount]
-    return user.subaccount_ids
+    with SessionLocal() as s:
+        first = default_account_id(s, user.subaccount_ids)
+    return [first] if first is not None else []
 
 
 def _date_bounds(frm: str | None, till: str | None):
@@ -107,39 +118,57 @@ def _available(s, ts_col, ts_where, date_col, date_where) -> list[str | None]:
 # --------------------------------------------------------------------------- #
 @router.get("/filters")
 def filters(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Selector contents + defaults. build 18: one account at a time — `accounts` sorted by name,
+    `defaults.subaccount` = the first one; `by_account` = per account its underlyings, assets
+    (graph ②b) and default underlying, so the other selectors follow the chosen account."""
     subs = user.subaccount_ids
     with SessionLocal() as s:
         # build 6: one list for the Underlying selector and the Settings asset list — underlyings
         # with at least one non-zero position in the accounts (app.web.accounts)
         underlyings = account_underlyings(s, subs)
         strategies = [
-            {"id": sid, "name": name, "color": color}
-            for sid, name, color in s.execute(
-                select(Strategy.id, Strategy.name, Strategy.color)
+            {"id": sid, "name": name, "color": color, "subaccount_id": sub_id}
+            for sid, name, color, sub_id in s.execute(
+                select(Strategy.id, Strategy.name, Strategy.color, Strategy.subaccount_id)
                 .where(Strategy.subaccount_id.in_(subs), Strategy.deleted_at.is_(None))
                 .order_by(Strategy.name)
             )
         ]
-        assets = sorted({c for (c,) in s.execute(
-            select(AssetBalanceTimeseries.ccy)
-            .where(AssetBalanceTimeseries.subaccount_id.in_(subs))
-        ) if c})
+        asset_rows = s.execute(
+            select(AssetBalanceTimeseries.subaccount_id, AssetBalanceTimeseries.ccy).distinct()
+            .where(AssetBalanceTimeseries.subaccount_id.in_(subs))).all()
+        assets = sorted({c for _sid, c in asset_rows if c})
         # Defaults the Dashboard fills into its selectors BEFORE drawing anything, so every graph
-        # uses (and the page shows) the same values: the underlying with the most position legs
-        # (ties: alphabetical), and the user's only account — or "" = all accounts when several.
-        leg_counts = dict(s.execute(
-            select(GoldPositionLeg.underlying, func.count())
+        # uses (and the page shows) the same values: per account the underlying with the most
+        # position legs (ties: alphabetical); build 18: the first account by name.
+        leg_rows = s.execute(
+            select(GoldPositionLeg.subaccount_id, GoldPositionLeg.underlying, func.count())
             .where(GoldPositionLeg.subaccount_id.in_(subs), GoldPositionLeg.underlying.isnot(None))
-            .group_by(GoldPositionLeg.underlying)).all())
+            .group_by(GoldPositionLeg.subaccount_id, GoldPositionLeg.underlying)).all()
         # account names for the Account selectors — the same names as on the Box builder
-        accounts = [{"id": a["id"], "label": a["label"]} for a in account_options(s, subs)]
-    default_ul = (min(underlyings, key=lambda u: (-leg_counts.get(u, 0), u))
-                  if underlyings else None)
+        accounts = [{"id": a["id"], "label": a["label"]}
+                    for a in sort_accounts(account_options(s, subs))]
+        by_account = {}
+        for a in accounts:
+            uls = account_underlyings(s, [a["id"]])
+            counts = {u: n for sid, u, n in leg_rows if sid == a["id"]}
+            by_account[a["id"]] = {
+                "underlyings": uls,
+                "assets": sorted({c for sid, c in asset_rows if sid == a["id"] and c}),
+                "default_underlying": (min(uls, key=lambda u: (-counts.get(u, 0), u))
+                                       if uls else None)}
+    leg_counts: dict[str, int] = defaultdict(int)
+    for _sid, u, n in leg_rows:
+        leg_counts[u] += n
+    first = accounts[0]["id"] if accounts else None
+    default_ul = ((by_account[first]["default_underlying"] if first is not None else None)
+                  or (min(underlyings, key=lambda u: (-leg_counts.get(u, 0), u))
+                      if underlyings else None))
     return {"underlyings": underlyings, "strategies": strategies, "assets": assets,
-            "subaccounts": subs, "accounts": accounts, "is_admin": user.is_admin,
+            "subaccounts": subs, "accounts": accounts, "by_account": by_account,
+            "is_admin": user.is_admin,
             "periods": ["mtd", "ytd", "all", "7d", "30d", "90d"],
-            "defaults": {"underlying": default_ul,
-                         "subaccount": subs[0] if len(subs) == 1 else ""}}
+            "defaults": {"underlying": default_ul, "subaccount": first}}
 
 
 # ②b Per-asset (in-kind) equity & daily net P&L --------------------------- #
@@ -317,9 +346,19 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
                 .where(IndexCandle.cex_code == cex, IndexCandle.inst_id == chosen,
                        IndexCandle.bar == "1h")
                 .order_by(IndexCandle.ts.desc()).limit(1)).first()
+        coin_ul = (chosen or "").split("-")[0] or None
+        q_rows = s.execute(select(HedgedPosition.qty).where(
+            HedgedPosition.subaccount_id.in_(subs), HedgedPosition.ccy == coin_ul)
+        ).scalars().all() if coin_ul else []
+        acct_name = account_labels(s, subs[:1]).get(subs[0]) if subs else None
 
     multi_acct = len({b.subaccount_id for b in boxes}) > 1
     box_key = {(b.subaccount_id, b.strategy_id): i for i, b in enumerate(boxes)}
+    # build 18: the future-PnL panel — the open legs of the boxes in the legend (period filter)
+    in_legend = [(lg, box_key.get((lg.subaccount_id, lg.strategy_id))) for lg, _d in pairs]
+    hedge = _hedge_block(in_legend, now, _f(last[1]) if last else None,
+                         _iso(last[0] + timedelta(minutes=int(last[2]) - 1)) if last else None,
+                         sum(_f(q) for q in q_rows) if q_rows else None, coin_ul, acct_name)
     box_legs: dict[tuple, list] = defaultdict(list)   # the shown legs of each box → its split
     for _lg, dom in pairs:
         box_legs[(dom.subaccount_id, dom.strategy_id)].append(dom)
@@ -366,7 +405,41 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
         "last": ({"t": _iso(last[0] + timedelta(minutes=int(last[2]) - 1)), "close": _f(last[1])}
                  if last else None),
         "boxes": out_boxes, "legs": out_legs, "exposure": exposure,
+        "hedge": hedge,                              # build 18: the future-PnL panel
     }
+
+
+def _hedge_block(rows, now: datetime, s0: float | None, s0_at: str | None, qty: float | None,
+                 coin: str | None, account: str | None) -> dict:
+    """build 18 — the future-PnL panel right of graph ①: Q of the coin hedged by the open option
+    legs of the boxes the graph shows — `rows` = (gold leg, box key) for the legs inside the
+    reporting period, so a box not in the legend contributes nothing. 20 Nov: the page adds up only
+    the boxes switched on in the legend, so the options part comes PER BOX: `boxes[key]` = that
+    box's options-only profile (hedge_profile with Q = 0); the page adds Q·(S − S0) and the visible
+    boxes. Q comes from core.hedged_position (Settings → Position hedged); not set → 0, `qty_set`
+    false."""
+    by_box: dict[int, list[OptionLeg]] = defaultdict(list)
+    skipped, lines = 0, []
+    for lg, key in rows:
+        ot = (lg.opt_type or "").upper()
+        if key is None or lg.status != "open" or lg.strike is None or ot not in ("C", "P"):
+            continue
+        if lg.expires_at is not None and lg.expires_at <= now:
+            continue                                  # expired, close not collected yet
+        side = (lg.side or "").lower()
+        if lg.size_coin is None or side not in ("long", "short"):
+            skipped += 1                              # no coin size (ct_val) or side: left out
+            continue
+        size = abs(_f(lg.size_coin)) * (1 if side == "long" else -1)
+        by_box[key].append(OptionLeg(strike=_f(lg.strike), opt_type=ot, size=size))
+        lines.append({"id": lg.position_leg_id, "box": key, "inst_id": lg.inst_id,
+                      "strike": _f(lg.strike), "opt_type": ot, "side": side,
+                      "size_coin": abs(size), "expires_at": _iso(lg.expires_at)})
+    out = {"coin": coin, "account": account, "qty": qty, "qty_set": qty is not None,
+           "ref_px": s0, "ref_at": s0_at, "legs": lines, "n_skipped": skipped, "boxes": {}}
+    if s0 is not None:
+        out["boxes"] = {key: hedge_profile(legs, 0.0, s0) for key, legs in by_box.items()}
+    return out
 
 
 # ① candles for any window of graph ① (build 9: navigation beyond the reporting period) ---- #

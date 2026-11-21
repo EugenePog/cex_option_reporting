@@ -28,6 +28,12 @@
      now           → build 9 rev 2: {shape, traces, skew} — the "now" line (ChartNav.nowShape /
                      nowTrace) moves on every minute; skew = server clock − browser clock (ms)
      words         → {scale, values} for the help texts ("price scale" / "prices" by default)
+     extraY(y0, y1)→ build 18: more Plotly.relayout keys for a new value range (e.g. a side panel's
+                     x range that follows the visible prices)
+   build 18: a SIDE PANEL — a second x axis on the same value axis, right of the time axis (graph ①
+   future-PnL profile: xaxis domain ends before the plot area does). There: drag up / down = move
+   the values, wheel = zoom the values at the cursor, double-click = values fit again; time is not
+   touched. The page handles hover / click in it.
    ChartNav.group([navA, navB], {syncX}) — build 10: charts of one card share the wheel (one click
    activates both); syncX = they also move / zoom together (graph ② "Sync timelines").
    The x axis must be a Plotly date axis ('xaxis'), values on 'yaxis' (left or right); other y
@@ -167,7 +173,8 @@
       if (!L || !L.xaxis || !L.yaxis || !L._size || !L.xaxis._length) return null;
       const xa = L.xaxis, ya = L.yaxis, sz = L._size;
       return {xa, ya, l: sz.l, t: sz.t, w: sz.w, h: sz.h, W: L.width, H: L.height,
-              x0: xa._offset, xw: xa._length, y0: ya._offset, yh: ya._length, left: ya.side === "left"};
+              x0: xa._offset, xw: xa._length, y0: ya._offset, yh: ya._length, left: ya.side === "left",
+              xEnd: xa._offset + xa._length};    // build 18: a side panel may follow up to l + w
     }
     function current(g) {
       const xr = g.xa.range, yr = g.ya.range;
@@ -183,8 +190,11 @@
     function zoneAt(e, g) {
       if (e.target && e.target.closest && e.target.closest(".legend")) return null;
       const r = gd.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
-      const inX = px >= g.l && px <= g.l + g.w, inY = py >= g.t && py <= g.t + g.h;
+      const inX = px >= g.l && px <= g.xEnd, inY = py >= g.t && py <= g.t + g.h;
       if (inX && inY) return {zone: "plot", px, py, price: py >= g.y0 && py <= g.y0 + g.yh};
+      // build 18: the side panel (right of the time axis, inside the plot area), price rows only
+      if (px > g.xEnd && px <= g.l + g.w && py >= g.y0 && py <= g.y0 + g.yh)
+        return {zone: "side", px, py, price: true};
       // the value scale: the margin on the side of the y axis (build 10: left or right)
       const onScale = g.left ? px >= 0 && px < g.l : px > g.l + g.w && px <= g.W;
       if (onScale && py >= g.y0 - 6 && py <= g.y0 + g.yh + 6) return {zone: "price", px, py};
@@ -224,6 +234,7 @@
       let y = n.y || null;
       if (S.auto) y = fit(x[0], x[1]) || y;
       if (y && (y[0] !== c.y0 || y[1] !== c.y1)) upd["yaxis.range"] = y;
+      if (S.opts.extraY) Object.assign(upd, S.opts.extraY(...(y || [c.y0, c.y1])) || {});   // build 18
       if (S.opts.ticks && n.x) Object.assign(upd, tickUpdate(x[0], x[1], g.xw));
       if (S.opts.extra) Object.assign(upd, S.opts.extra(x[0], x[1]) || {});
       if (Object.keys(upd).length) relayout(upd);
@@ -334,6 +345,11 @@
           }
         }
         queue(ch);
+      } else if (d.zone === "side") {           // build 18: move the values only
+        if (Math.abs(dy) < 3) return;
+        setAuto(false);
+        const k = (d.vy[1] - d.vy[0]) / g.yh, s = (e.clientY - d.ay) * k;
+        queue({y: [d.vy[0] + s, d.vy[1] + s]});
       } else if (d.zone === "price") {
         setAuto(false);
         const f = Math.exp(dy * K.priceDrag), mid = (v.y0 + v.y1) / 2, half = (v.y1 - v.y0) / 2 * f;
@@ -364,7 +380,7 @@
       let dx = e.deltaX * u, dy = e.deltaY * u;
       if (e.shiftKey && !dx) { dx = dy; dy = 0; }   // Shift + wheel = sideways
       const v = view(g);
-      if (z.zone === "price") {
+      if (z.zone === "price" || z.zone === "side") {
         if (!dy) return;
         setAuto(false);
         const p = v.y1 - (z.py - g.y0) / g.yh * (v.y1 - v.y0);
@@ -414,7 +430,7 @@
       if (!z) return;
       e.preventDefault();
       e.stopPropagation();
-      if (z.zone === "price") { setAuto(true); queue({}); }
+      if (z.zone === "price" || z.zone === "side") { setAuto(true); queue({}); }
       else if (z.zone === "date") goHome();
       else homeAll();
     }
@@ -424,7 +440,8 @@
       if (S.drag) return;
       const g = geo();
       const z = g ? zoneAt(e, g) : null;
-      gd.style.cursor = z && z.zone === "price" ? "ns-resize" : z && z.zone === "date" ? "ew-resize" : "";
+      gd.style.cursor = z && z.zone === "price" ? "ns-resize" : z && z.zone === "date" ? "ew-resize"
+        : z && z.zone === "side" ? "crosshair" : "";
     }
 
     gd.addEventListener("pointerdown", onDown, true);

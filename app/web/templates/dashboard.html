@@ -21,7 +21,13 @@
       all its legs; its label splits the size: C = calls, P = puts, + bought, − sold; each line shows its
       own size, <span style="color:#22c55e">+ bought</span> / <span style="color:#ef4444">− sold</span> (above a call, below a put).
       Below: open size over time — calls above 0, puts below; green = long, red = short (a leg counts
-      until it is closed). Sizes in coin (BTC). Times in UTC.<br>Navigate like TradingView: drag the chart to move; click it, then use the wheel to zoom
+      until it is closed). Sizes in coin (BTC). Times in UTC.<br>
+      Right of the chart: <b>PnL at expiry</b> if the price ends at that level — the account's hedged
+      amount Q (Settings → Position hedged) with the open options of the boxes in the legend (switch a box off
+      there and its options drop out), from the current price, no premiums.
+      Width = size of the PnL: <span style="color:#22c55e">profit</span> / <span style="color:#ef4444">loss</span>
+      with options; out to the coin alone (no options): <span style="color:#7fb069">options save</span> /
+      <span style="color:#c98a80">options cost</span>. White lines: open strikes. Hover for USD and coin; click to pin.<br>Navigate like TradingView: drag the chart to move; click it, then use the wheel to zoom
       (trackpad: two fingers move / zoom, pinch zooms); drag or scroll the price / date scale to stretch it;
       double-click to go back. More candles load as you move.
       <b>?</b> under the price scale lists everything.</p>
@@ -131,19 +137,19 @@ const state = { underlying: "", subaccount: "" };
 async function boot() {
   const f = await api("/filters"); if (!f) return;
   // Fill the selectors with the values the graphs will actually use, THEN draw: the server's
-  // defaults (underlying with the most legs; the only account, or all accounts) are applied to
-  // state first, so the page never shows "All" while a graph silently picks something else.
+  // defaults are applied to state first, so the page never shows one thing while a graph silently
+  // picks another. build 18: ONE account at a time — no "All"; the first account by name is the
+  // default, and the Underlying / asset lists follow the chosen account.
+  FILTERS = f;
   const def = f.defaults || {};
-  fillSelect(document.getElementById("f-underlying"), f.underlyings);   // one underlying at a time
   fillSelect(document.getElementById("f-subaccount"),
-             f.accounts.map(a => ({id: a.id, name: a.label})), {value:"id",label:"name",blank:"All"});
-  state.underlying = def.underlying || f.underlyings[0] || "";
+             f.accounts.map(a => ({id: a.id, name: a.label})), {value:"id",label:"name"});
   state.subaccount = def.subaccount != null ? String(def.subaccount) : "";
-  document.getElementById("f-underlying").value = state.underlying;
   document.getElementById("f-subaccount").value = state.subaccount;
-  fillSelect(document.getElementById("f-asset"), f.assets || []);
+  applyAccount(def.underlying);
   document.getElementById("f-underlying").onchange = e => { state.underlying = e.target.value; renderBook(); };
-  document.getElementById("f-subaccount").onchange = e => { state.subaccount = e.target.value; renderAll(); };
+  document.getElementById("f-subaccount").onchange = e => {
+    state.subaccount = e.target.value; applyAccount(state.underlying); renderAll(); };
   document.getElementById("f-asset").onchange = () => renderAssetEquity();
   document.getElementById("f-expiry").onchange = () => renderPayoff();
   document.getElementById("pb-bar").onchange = () => { pbShowRange(); renderPriceBoxes(); };
@@ -154,6 +160,20 @@ async function boot() {
   setupPeriod("1", renderEquity);       // sets default (1m) from/till before first render
   setupPeriod("1b", renderAssetEquity);
   renderAll();
+}
+// build 18: the Underlying and ②b asset lists of the chosen account (all accounts' lists when it
+// has none yet); `keep` stays selected when the account has it, else the account's default.
+let FILTERS = null;
+function applyAccount(keep){
+  const f = FILTERS, ba = (f.by_account || {})[state.subaccount] || {};
+  const uls = ba.underlyings && ba.underlyings.length ? ba.underlyings : f.underlyings;
+  fillSelect(document.getElementById("f-underlying"), uls);          // one underlying at a time
+  state.underlying = uls.includes(keep) ? keep : (ba.default_underlying || uls[0] || "");
+  document.getElementById("f-underlying").value = state.underlying;
+  const sel = document.getElementById("f-asset"), was = sel.value;
+  const assets = ba.assets && ba.assets.length ? ba.assets : (f.assets || []);
+  fillSelect(sel, assets);
+  if (assets.includes(was)) sel.value = was;
 }
 function renderAll(){ renderEquity(); renderAssetEquity(); renderBook(); }   // renderBook draws ① too
 
@@ -454,6 +474,9 @@ async function renderPriceBoxes(){
   for (const [txt, y, ya] of [["Calls ▲", 1, "top"], ["Puts ▼", 0, "bottom"]])   // build 13 rev 2: centred
     ann.push({xref: "paper", x: 0.5, yref: "y2 domain", y, xanchor: "center", yanchor: ya, showarrow: false,
               text: txt, font: {color: "#aab2bf", size: 12}, bgcolor: "rgba(20,23,28,0.6)", borderpad: 1});
+  // build 18: the future-PnL panel right of the time axis (x2 on the same price axis)
+  pnlBuild(d.hedge, Date.parse(d.now), traces, ann);
+
   // "now" = the dotted line (server time); build 9 rev 2: a hover label along it (date and time, UTC
   // and the browser's local time) and it moves on every minute
   // (build 10: the line, its hover points and the per-minute move are ChartNav's, shared with ②)
@@ -466,6 +489,7 @@ async function renderPriceBoxes(){
     now.traces.push(traces.length);
     traces.push(ChartNav.nowTrace(nowMs, "y2", Array.from({length: 17}, (_, i) => -r2 + 2 * r2 * i / 16)));
   }
+  PNL.shape0 = shapes.length; shapes.push(...pnlShapes());   // after "now": their count varies
   if (last) ann.push({xref: "paper", x: 1, y: last.close, yref: "y", xanchor: "left", showarrow: false,
     text: fmtPx(last.close), font: {color: "#fff", size: 11}, borderpad: 3,
     bgcolor: (lastC && lastC.c < lastC.o) ? "#ef5350" : "#26a69a"});
@@ -475,11 +499,19 @@ async function renderPriceBoxes(){
   const y0 = pbFit(PB.home[0], PB.home[1], true);
   const gd = document.getElementById("c-pricebox");
   // build 9 rev 2: date ticks twice as dense as Plotly's own choice (re-picked on every view change)
-  const tk = ChartNav.dateTicks(PB.home[0], PB.home[1], (gd.clientWidth || 1200) - 16 - 78, 2);
+  // build 18: the time axis ends where the future-PnL panel starts (PNL.split of the plot width)
+  const plotW = (gd.clientWidth || 1200) - 16 - 78;
+  PNL.split = 1 - Math.min(Math.max(plotW * 0.16, 150), 240) / plotW;
+  const tk = ChartNav.dateTicks(PB.home[0], PB.home[1], plotW * PNL.split, 2);
   await Plotly.newPlot(gd, traces, layout({
     xaxis: {type: "date", range: [plotT(d.range[0]), plotT(d.range[1])], rangeslider: {visible: false},
-            anchor: "y2", ...tk},
-    yaxis: {domain: [0.25, 1], side: "right", tickformat: ",.0f", ...(y0 ? {range: y0} : {})},
+            anchor: "y2", domain: [0, PNL.split - 0.004], ...tk},
+    // build 18: PnL at expiry (|USD|, colour = sign) on the same price axis; follows the prices
+    xaxis2: {domain: [PNL.split + 0.004, 1], anchor: "y", fixedrange: true, showgrid: false,
+             zeroline: true, zerolinecolor: "#5a6270", showticklabels: false, ticks: "",
+             range: pnlRange(...(y0 || [0, 1]))},
+    yaxis: {domain: [0.25, 1], side: "right", anchor: "free", position: 1, tickformat: ",.0f",
+            ...(y0 ? {range: y0} : {})},
     // build 13: mirrored open-size strip (calls above 0, puts below), a little taller than before
     yaxis2: {domain: [0, 0.2], side: "right", fixedrange: true, ...y2,
              title: {text: d.coin || ""}, gridcolor: "#232833", zeroline: true,
@@ -493,8 +525,10 @@ async function renderPriceBoxes(){
   if (gen !== PB.gen) return;                  // a newer render took over
   ChartNav.attach(gd).reset({
     home: () => PB.home, fitY: pbFit, extra: pbExtra, onView: pbOnView, limits: pbLimits,
-    ticks: 2, now});                           // dense date ticks; "now" moves every minute
+    extraY: pnlExtraY, ticks: 2, now});        // dense date ticks; "now" moves every minute
   gd.on("plotly_restyle", pbSyncLabels);       // build 13: a box hidden in the legend hides its labels
+  pnlAttach(gd);                               // build 18: hover / click read-outs of the panel
+  gd.on("plotly_restyle", () => pnlRefresh(gd));   // 20 Nov: a grey box drops out of the panel
 }
 
 // --- ① navigation (build 9): fit, labels and more candles while you move ------------------------
@@ -647,6 +681,217 @@ async function pbLoad(p){
   await Plotly.restyle("c-pricebox", {x: [PB.cd.x], open: [PB.cd.o], high: [PB.cd.h], low: [PB.cd.l],
                                       close: [PB.cd.c]}, [0]);
   if (gen === PB.gen && PB.view) pbOnView(PB.view[0], PB.view[1]);   // the view may have moved on
+}
+
+// --- ① future-PnL panel (build 18) -------------------------------------------------------------
+// Right of the time axis, on the same price scale: the PnL at expiry if the price ends at that level
+// — Q (Settings → Position hedged) of the coin hedged by the open option legs of the boxes the
+// graph shows: in the legend (the reporting period decides that) AND switched on there — a grey
+// box drops out, and the panel is rebuilt on every legend click (20 Nov). Counted from the current
+// price S0, intrinsic values only (no premiums). Width = |PnL| in USD, colour = sign: green profit / red loss "with options";
+// the band out to "BTC only" (Q without options): dark green where the options save, brown where
+// they cost. The profile is exact: the server sends per box the options-only values at its strikes
+// and S0 plus the end slopes (app/domain/hedge.py hedge_profile); pnlCombine adds Q and the visible
+// boxes (combine_profiles), pnlAt interpolates (profile_at). White lines: the open strikes of the
+// visible boxes (and S0 dashed) from now to the panel. Hover = read-out in
+// USD and coin; click = pin it (click it again / Esc = unpin).
+const PNL = {h: null, prof: null, split: 0.84, range: null, pin: null, gd: null, keys: [], now: 0,
+             trace0: -1, ann: -1, shape0: -1, sig: ""};
+const PNL_POS = "rgba(40,199,48,0.92)", PNL_NEG = "rgba(240,32,32,0.92)",
+      PNL_HELP = "rgba(72,124,58,0.92)", PNL_COST = "rgba(126,58,58,0.92)";
+function pnlAt(S, prof){
+  const pr = prof || PNL.prof, pts = pr.points, K = ["hedged", "btc_only"], o = {};
+  const ext = (p, k) => { for (const key of K) o[key] = p[key] + k[key] * (S - p.px); return o; };
+  if (S <= pts[0].px) return ext(pts[0], pr.slope_below);
+  if (S >= pts[pts.length - 1].px) return ext(pts[pts.length - 1], pr.slope_above);
+  let i = 1; while (pts[i].px < S) i++;
+  const a = pts[i - 1], b = pts[i], f = (S - a.px) / (b.px - a.px);
+  for (const key of K) o[key] = a[key] + f * (b[key] - a[key]);
+  return o;
+}
+// price grid: 0, the profile points, far above; + every place where P or P − P0 changes sign
+function pnlGrid(){
+  const pts = PNL.prof.points, s0 = PNL.h.ref_px, top = pts[pts.length - 1].px + 5 * s0;
+  const base = [...new Set([0, ...pts.map(p => p.px), top])].sort((a, b) => a - b), out = [];
+  const val = S => { const v = pnlAt(S); return [v.hedged, v.hedged - v.btc_only]; };
+  for (let i = 0; i < base.length; i++) {
+    if (i) {
+      const a = base[i - 1], b = base[i], va = val(a), vb = val(b), cut = [];
+      for (const j of [0, 1]) if (va[j] * vb[j] < 0) cut.push(a + (b - a) * va[j] / (va[j] - vb[j]));
+      out.push(...cut.sort((x, y) => x - y));
+    }
+    out.push(base[i]);
+  }
+  return out;
+}
+// box keys switched on in the legend (a box's traces share legendgroup "box<key>")
+function pnlVisibleKeys(gd){
+  const hidden = new Set(((gd && gd.data) || []).filter(t => t.visible === "legendonly").map(t => t.legendgroup));
+  return Object.keys(PNL.h.boxes || {}).filter(k => !hidden.has("box" + k));
+}
+// one profile = Q·(S − S0) + the visible boxes' options-only profiles (combine_profiles in Python)
+function pnlCombine(keys){
+  const h = PNL.h, q = h.qty || 0, s0 = h.ref_px, prs = keys.map(k => h.boxes[k]);
+  const pxs = [...new Set([s0, ...prs.flatMap(pr => pr.points.map(p => p.px))])].sort((a, b) => a - b);
+  const sum = (f) => prs.reduce((t, pr) => t + f(pr), 0);
+  return {points: pxs.map(px => ({px, btc_only: q * (px - s0), hedged: q * (px - s0) + sum(pr => pnlAt(px, pr).hedged)})),
+          slope_below: {hedged: q + sum(pr => pr.slope_below.hedged), btc_only: q},
+          slope_above: {hedged: q + sum(pr => pr.slope_above.hedged), btc_only: q}};
+}
+// x / y of the six panel traces: profit, loss, options save, options cost, outline, coin-only line
+function pnlData(){
+  const h = PNL.h, grid = pnlGrid(), P = grid.map(S => pnlAt(S));
+  const F = [0, 1, 2, 3].map(() => ({x: [], y: []}));
+  for (let i = 1; i < grid.length; i++) {
+    const a = grid[i - 1], b = grid[i], m = pnlAt((a + b) / 2), pa = P[i - 1], pb = P[i];
+    const f = F[m.hedged >= 0 ? 0 : 1];
+    f.x.push(0, Math.abs(pa.hedged), Math.abs(pb.hedged), 0, 0, null); f.y.push(a, a, b, b, a, null);
+    const dlt = m.hedged - m.btc_only, g = !h.qty_set ? null : dlt > 0 ? F[2] : dlt < 0 ? F[3] : null;
+    if (g) { g.x.push(Math.abs(pa.hedged), Math.abs(pa.btc_only), Math.abs(pb.btc_only), Math.abs(pb.hedged), Math.abs(pa.hedged), null);
+             g.y.push(a, a, b, b, a, null); }
+  }
+  F.push({x: P.map(v => Math.abs(v.hedged)), y: grid});
+  F.push(h.qty_set ? {x: P.map(v => Math.abs(v.btc_only)), y: grid} : {x: [], y: []});
+  return F;
+}
+const PNL_STYLE = [{fill: "toself", fillcolor: PNL_POS, line: {width: 0}}, {fill: "toself", fillcolor: PNL_NEG, line: {width: 0}},
+  {fill: "toself", fillcolor: PNL_HELP, line: {width: 0}}, {fill: "toself", fillcolor: PNL_COST, line: {width: 0}},
+  {line: {color: "rgba(230,237,247,0.55)", width: 1}}, {line: {color: "rgba(230,237,247,0.35)", width: 1, dash: "dot"}}];
+function pnlHead(){
+  const h = PNL.h, c = escH(h.coin || ""), legs = h.legs.filter(l => PNL.keys.includes(String(l.box))).length;
+  if (!PNL.prof) return "PnL at expiry<br>no current price";
+  return `PnL at expiry<br>${h.qty_set ? `Q ${pbNum(h.qty)} ${c}` : "Q not set"} · ${plural(legs, "leg", "legs")}`;
+}
+// white lines: the open strikes of the visible boxes (one per strike) + S0 dashed, now → the panel
+function pnlShapes(){
+  if (!PNL.prof) return [];
+  const out = [], far = msPlot(PNL.now + 3650 * 864e5), now = msPlot(PNL.now);
+  const line = (K, dash) => {
+    const st = {color: "rgba(255,255,255,0.85)", width: 1.4, dash: dash ? "dash" : "solid"};
+    out.push({type: "line", xref: "x", yref: "y", x0: now, x1: far, y0: K, y1: K, line: st});
+    if (!dash) out.push({type: "line", xref: "x2", yref: "y", x0: 0, x1: Math.abs(pnlAt(K).hedged), y0: K, y1: K, line: st});
+  };
+  for (const K of new Set(PNL.h.legs.filter(l => PNL.keys.includes(String(l.box))).map(l => l.strike))) line(K, false);
+  line(PNL.h.ref_px, true);
+  return out;
+}
+// first draw (all boxes of the legend are on): six traces (always six, so a legend click can
+// restyle them in place) + the header annotation
+function pnlBuild(h, nowMs, traces, ann){
+  PNL.h = h; PNL.now = nowMs; PNL.pin = null; PNL.range = null;
+  PNL.keys = h ? Object.keys(h.boxes || {}) : [];
+  PNL.sig = PNL.keys.join(",");
+  PNL.prof = h && h.ref_px != null ? pnlCombine(PNL.keys) : null;
+  PNL.trace0 = traces.length;
+  const F = PNL.prof ? pnlData() : PNL_STYLE.map(() => ({x: [], y: []}));
+  F.forEach((f, i) => traces.push({type: "scatter", mode: "lines", xaxis: "x2", yaxis: "y", x: f.x, y: f.y,
+    connectgaps: false, hoverinfo: "skip", showlegend: false, name: "PnL at expiry", ...PNL_STYLE[i]}));
+  PNL.ann = ann.length;
+  ann.push({xref: "x2 domain", x: 0.03, yref: "y domain", y: 1, xanchor: "left", yanchor: "top",
+    showarrow: false, align: "left", text: h ? pnlHead() : "PnL at expiry", font: {color: "#aab2bf", size: 10.5}});
+}
+// a legend click: rebuild the profile from the boxes now switched on (20 Nov)
+function pnlRefresh(gd){
+  if (!PNL.prof || PNL.trace0 < 0) return;
+  const keys = pnlVisibleKeys(gd), sig = keys.join(",");
+  if (sig === PNL.sig) return;                  // our own restyle, or another trace toggled
+  PNL.sig = sig; PNL.keys = keys; PNL.prof = pnlCombine(keys); PNL.range = null;
+  const F = pnlData(), idx = F.map((_, i) => PNL.trace0 + i);
+  Plotly.restyle(gd, {x: F.map(f => f.x), y: F.map(f => f.y)}, idx);
+  const shapes = (gd.layout.shapes || []).slice(0, PNL.shape0).concat(pnlShapes());
+  const yr = gd._fullLayout.yaxis.range;
+  Plotly.relayout(gd, {shapes, [`annotations[${PNL.ann}].text`]: pnlHead(), "xaxis2.range": pnlRange(+yr[0], +yr[1])});
+  pnlShow("pin", gd, PNL.pin);
+}
+// the panel's |USD| range for the visible prices: largest value on screen (ends + points), 8% pad
+function pnlRange(y0, y1){
+  if (!PNL.prof) return [0, 1];
+  let m = 0;
+  const take = S => { const v = pnlAt(S); m = Math.max(m, Math.abs(v.hedged), PNL.h.qty_set ? Math.abs(v.btc_only) : 0); };
+  take(Math.max(y0, 0)); take(Math.max(y1, 0));
+  for (const p of PNL.prof.points) if (p.px > y0 && p.px < y1) take(p.px);
+  return [0, (m || 1) * 1.08];
+}
+function pnlExtraY(y0, y1){
+  const r = pnlRange(y0, y1), o = PNL.range;
+  if (o && Math.abs(r[1] - o[1]) <= o[1] * 0.005) return {};
+  PNL.range = r;
+  return {"xaxis2.range": r};
+}
+// read-out at price S: with options / BTC only / options, in USD and coin (USD ÷ S)
+const pnlUsd = v => (v < -0.5 ? "−" : v > 0.5 ? "+" : "") + "$" + Math.abs(v).toLocaleString(undefined, {maximumFractionDigits: 0});
+const pnlCoin = (v, S) => { const x = S > 0 ? v / S : 0; return (x < -5e-5 ? "−" : x > 5e-5 ? "+" : "") + Math.abs(x).toFixed(4); };
+function pnlText(S){
+  const h = PNL.h, v = pnlAt(S), o = v.hedged - v.btc_only, s0 = h.ref_px, c = escH(h.coin || "");
+  const mv = (S / s0 - 1) * 100, row = (name, x, cls) =>
+    `<tr${cls ? ` class="${cls}"` : ""}><td>${name}</td><td>${pnlUsd(x)}</td><td>${pnlCoin(x, S)} ${c}</td></tr>`;
+  let note = "";
+  if (!h.qty_set) note = "Q not set (Settings → Position hedged): options only";
+  else if (Math.abs(v.btc_only) > 0.5 && Math.abs(o) > 0.5) {
+    const share = Math.round(Math.abs(o) / Math.abs(v.btc_only) * 100), fall = v.btc_only < 0;
+    note = fall ? (o > 0 ? `options cover ${share}% of the fall` : `options add ${share}% to the fall`)
+                : (o < 0 ? `options give up ${share}% of the rise` : `options add ${share}% to the rise`);
+  }
+  return `<div class="pnl-h"><b>${c} at ${Math.round(S).toLocaleString()}</b> <span>${mv >= 0 ? "+" : "−"}${Math.abs(mv).toFixed(1)}% from ${fmtPx(s0)}</span></div>` +
+    `<table>${row("With options", v.hedged, v.hedged >= 0 ? "pos" : "neg")}` +
+    (h.qty_set ? row(`${c} only (Q ${pbNum(h.qty)})`, v.btc_only) : "") +
+    row("Options", o, o > 0 ? "help" : o < 0 ? "cost" : "") + `</table>` +
+    (note ? `<div class="pnl-n">${note}</div>` : "") +
+    `<div class="pnl-n">at expiry · intrinsic only, no premiums · from ${fmtUtc(h.ref_at)}</div>`;
+}
+// geometry of the panel in the chart's pixels (null when not drawn)
+function pnlGeo(gd){
+  const L = gd._fullLayout;
+  if (!PNL.prof || !L || !L.xaxis2 || !L.yaxis || !L.xaxis2._length) return null;
+  const xa = L.xaxis2, ya = L.yaxis, r = ya.range.map(Number);
+  return {x0: xa._offset, xw: xa._length, y0: ya._offset, yh: ya._length,
+          toS: py => r[1] - (py - ya._offset) / ya._length * (r[1] - r[0]),
+          toY: S => ya._offset + (r[1] - S) / (r[1] - r[0]) * ya._length};
+}
+function pnlShow(kind, gd, S){                 // kind = "hov" | "pin"; S null = hide
+  const host = gd.parentNode, key = "_pnl_" + kind;
+  let el = host[key];
+  if (!el) {
+    el = host[key] = {x: document.createElement("div"), tip: document.createElement("div")};
+    el.x.className = "pnl-x" + (kind === "pin" ? " pin" : ""); el.tip.className = "pnl-tip" + (kind === "pin" ? " pin" : "");
+    host.appendChild(el.x); host.appendChild(el.tip);
+  }
+  const g = S == null ? null : pnlGeo(gd);
+  const y = g ? g.toY(S) : null;
+  if (!g || y < g.y0 || y > g.y0 + g.yh) { el.x.style.display = el.tip.style.display = "none"; return; }
+  const gr = gd.getBoundingClientRect(), hr = host.getBoundingClientRect(), ox = gr.left - hr.left, oy = gr.top - hr.top;
+  Object.assign(el.x.style, {display: "block", left: ox + g.x0 + "px", width: g.xw + "px", top: oy + y + "px"});
+  el.tip.innerHTML = pnlText(S);
+  Object.assign(el.tip.style, {display: "block", left: ox + g.x0 - 8 + "px", top: oy + y + "px"});
+}
+function pnlAttach(gd){
+  PNL.gd = gd;
+  gd.on("plotly_relayout", () => pnlShow("pin", gd, PNL.pin));    // the pin follows the prices
+  gd.on("plotly_afterplot", () => pnlShow("pin", gd, PNL.pin));
+  pnlShow("pin", gd, null); pnlShow("hov", gd, null);
+  if (gd._pnlWired) return;                                         // DOM listeners: once
+  gd._pnlWired = true;
+  const at = e => {                                                 // price under the pointer, or null
+    const g = pnlGeo(gd); if (!g) return null;
+    const r = gd.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+    return px >= g.x0 && px <= g.x0 + g.xw && py >= g.y0 && py <= g.y0 + g.yh ? {S: g.toS(py), py, g} : null;
+  };
+  let down = null;
+  gd.addEventListener("pointermove", e => {
+    const p = gd.parentNode.classList.contains("cn-drag") ? null : at(e);
+    const nearPin = p && PNL.pin != null && Math.abs(p.g.toY(PNL.pin) - p.py) < 5;
+    pnlShow("hov", gd, p && !nearPin ? p.S : null);
+  }, {passive: true});
+  gd.addEventListener("pointerleave", () => pnlShow("hov", gd, null));
+  gd.addEventListener("pointerdown", e => { down = [e.clientX, e.clientY]; }, true);
+  gd.addEventListener("click", e => {
+    const p = at(e);
+    if (!p || !down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 4) return;   // a drag
+    const again = PNL.pin != null && Math.abs(p.g.toY(PNL.pin) - p.py) < 5;
+    PNL.pin = again ? null : p.S;
+    pnlShow("pin", gd, PNL.pin); pnlShow("hov", gd, null);
+  });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && PNL.pin != null) { PNL.pin = null; pnlShow("pin", gd, null); } });
 }
 
 async function renderEquity() {

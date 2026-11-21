@@ -88,3 +88,19 @@ html.fs-lock,html.fs-lock body{overflow:hidden}
   white-space:nowrap;font-variant-numeric:tabular-nums;cursor:default}
 .rpbar .rp-group{display:inline-flex;align-items:center;gap:14px;white-space:nowrap}
 .bar-range .br-grid{display:grid;grid-template-columns:repeat(3,auto);gap:1px 12px;font-size:11px;line-height:13px}
+/* Dashboard ① future-PnL panel (build 18): hover / pinned read-out */
+.pnl-x{position:absolute;height:0;border-top:1px dashed rgba(230,237,247,.75);pointer-events:none;z-index:2}
+.pnl-x.pin{border-top:1px solid #fff}
+.pnl-tip{position:absolute;z-index:3;pointer-events:none;transform:translate(-100%,-50%);background:rgba(20,23,29,.96);
+  border:1px solid #3a4352;border-radius:7px;padding:7px 10px;font-size:12px;color:#e6edf7;white-space:nowrap;
+  box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.pnl-tip.pin{border-color:#cfd6e0}
+.pnl-tip .pnl-h span{color:var(--muted);margin-left:4px}
+.pnl-tip table{width:auto;margin:5px 0 3px;font-size:12px}
+.pnl-tip td{padding:1px 0 1px 12px;text-align:right;border:0;font-variant-numeric:tabular-nums}
+.pnl-tip td:first-child{padding-left:0;text-align:left;color:#aab2bf}
+.pnl-tip tr:hover{background:transparent}
+.pnl-tip tr.pos td:nth-child(n+2){color:#4ade80} .pnl-tip tr.neg td:nth-child(n+2){color:#f87171}
+.pnl-tip tr.help td:nth-child(n+2){color:#9fd08a} .pnl-tip tr.cost td:nth-child(n+2){color:#e0a39a}
+.pnl-tip .pnl-n{color:var(--muted);font-size:11px;margin-top:2px}
+

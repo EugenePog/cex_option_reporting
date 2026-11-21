@@ -5,7 +5,7 @@
 <script src="/static/chartfs.js?v={{ asset_ver }}"></script>{% endblock %}
 {% block body %}
 <h1 class="page">Dashboard</h1>
-<p class="sub">Open book &amp; performance across strikes and maturities.</p>
+<p class="sub">Open book &amp; performance across strikes and maturities. <span id="auto-refresh" class="muted"></span></p>
 
 <div class="filters">
   <div class="fld"><label>Underlying</label><select id="f-underlying"></select></div>
@@ -160,6 +160,31 @@ async function boot() {
   setupPeriod("1", renderEquity);       // sets default (1m) from/till before first render
   setupPeriod("1b", renderAssetEquity);
   renderAll();
+  AUTO = autoRefresh(f.refresh_seconds, refreshAll, document.getElementById("auto-refresh"));
+}
+// build 19: every graph redrawn with fresh data at the pipeline cadence, keeping what the user set
+// up: each chart's time window / values / fit (ChartNav snapshot / restore), graph ①'s boxes
+// switched off in the legend and its pinned PnL read-out, the payoff expiry; filters and periods
+// are untouched (they live in the page's controls).
+let AUTO = null;
+const NAV_IDS = ["c-pricebox", "c-equity", "c-pnl", "c-asset-equity", "c-asset-pnl"];
+async function refreshAll(){
+  const navOf = id => (document.getElementById(id) || {})._chartNav;
+  const views = Object.fromEntries(NAV_IDS.map(id => [id, navOf(id) ? navOf(id).snapshot() : null]));
+  const pb = document.getElementById("c-pricebox");
+  const hidden = new Set((pb.data || []).filter(t => t.showlegend && t.visible === "legendonly").map(t => t.name));
+  const pin = PNL.pin;
+  const safe = p => Promise.resolve(p).catch(e => console.warn("refresh", e));
+  await Promise.all([safe(renderEquity()), safe(renderAssetEquity()), safe(renderPriceBoxes()),
+                     safe(renderMap()), safe(renderGreeks()), safe(renderLadder()), safe(renderPayoff(false))]);
+  // the same boxes off again — matched by legend name, as a box's key can change between draws
+  if (hidden.size && pb.data) {
+    const groups = new Set(pb.data.filter(t => t.showlegend && hidden.has(t.name)).map(t => t.legendgroup));
+    const idx = pb.data.map((t, i) => groups.has(t.legendgroup) ? i : -1).filter(i => i >= 0);
+    if (idx.length) await Plotly.restyle(pb, {visible: "legendonly"}, idx);
+  }
+  for (const id of NAV_IDS) if (navOf(id)) navOf(id).restore(views[id]);
+  if (pin != null && PNL.prof) { PNL.pin = pin; pnlShow("pin", pb, pin); }
 }
 // build 18: the Underlying and ②b asset lists of the chosen account (all accounts' lists when it
 // has none yet); `keep` stays selected when the account has it, else the account's default.
@@ -766,9 +791,11 @@ function pnlHead(){
 function pnlShapes(){
   if (!PNL.prof) return [];
   const out = [], far = msPlot(PNL.now + 3650 * 864e5), now = msPlot(PNL.now);
+  // build 19: S0 (dashed) starts where its price is from — the end of the newest 1-minute candle
+  const at = PNL.h.ref_at ? msPlot(Date.parse(PNL.h.ref_at)) : now;
   const line = (K, dash) => {
     const st = {color: "rgba(255,255,255,0.85)", width: 1.4, dash: dash ? "dash" : "solid"};
-    out.push({type: "line", xref: "x", yref: "y", x0: now, x1: far, y0: K, y1: K, line: st});
+    out.push({type: "line", xref: "x", yref: "y", x0: dash ? at : now, x1: far, y0: K, y1: K, line: st});
     if (!dash) out.push({type: "line", xref: "x2", yref: "y", x0: 0, x1: Math.abs(pnlAt(K).hedged), y0: K, y1: K, line: st});
   };
   for (const K of new Set(PNL.h.legs.filter(l => PNL.keys.includes(String(l.box))).map(l => l.strike))) line(K, false);

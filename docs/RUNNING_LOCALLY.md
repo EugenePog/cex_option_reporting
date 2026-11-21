@@ -478,6 +478,22 @@ pm2 restart web
 - Check: `select * from core.notification_feed_state;` (armed / sent per exchange × asset × code)
   and `scripts/check_alert.sql` for a box alert.
 
+### 10n. Auto-refresh + exact last-price time (build 19, no migration)
+
+```bash
+pm2 restart web
+```
+
+- **The Dashboard and the Analyze tab redraw themselves** every `PIPELINE_INTERVAL_SECONDS` (new data
+  can't arrive faster than the pipeline writes it); the subtitle shows "Updates every 5 min · last
+  HH:MM". Not while the browser tab is in the background (it catches up when you come back) and not
+  in the middle of a drag. Your zoom, the values scale, boxes switched off in graph ①'s legend, a
+  pinned PnL read-out, the payoff expiry and an open deals list all stay. Change the cadence with
+  `PIPELINE_INTERVAL_SECONDS` and restart `pipeline` and `web`.
+- **Last price** (label on graph ①, start of the PnL panel): the close of the newest stored
+  1-minute index candle, timed at the END of that minute (the time the price is from). With
+  snapshots every minute it is at most ~1 minute + one pipeline interval old.
+
 ---
 
 ## Running everything as services (pm2)

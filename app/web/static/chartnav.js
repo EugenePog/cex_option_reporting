@@ -34,6 +34,8 @@
    future-PnL profile: xaxis domain ends before the plot area does). There: drag up / down = move
    the values, wheel = zoom the values at the cursor, double-click = values fit again; time is not
    touched. The page handles hover / click in it.
+   nav.snapshot() / nav.restore(st) — build 19: keep the view (time window, values, fit on / off)
+   across a redraw of the chart (the page's auto-refresh).
    ChartNav.group([navA, navB], {syncX}) — build 10: charts of one card share the wheel (one click
    activates both); syncX = they also move / zoom together (graph ② "Sync timelines").
    The x axis must be a Plotly date axis ('xaxis'), values on 'yaxis' (left or right); other y
@@ -499,6 +501,21 @@
         retick();
       },
       refit() { if (S.auto) queue({}); },
+      /** build 19 (auto-refresh): the view to keep across a redraw — null while it is still the
+          home view with values fitting themselves (then the redraw's new home is right) */
+      snapshot() {
+        const g = geo();
+        if (!g || !S.opts) return null;
+        const v = view(g), h = S.opts.home ? S.opts.home() : null;
+        const atHome = S.auto && h && Math.abs(v.x0 - h[0]) < 1000 && Math.abs(v.x1 - h[1]) < 1000;
+        return atHome ? null : {x: [v.x0, v.x1], y: [v.y0, v.y1], auto: S.auto};
+      },
+      /** after nav.reset() of the redraw: the same time window, and the same values unless they fit */
+      restore(st) {
+        if (!st) return;
+        setAuto(st.auto);
+        queue({x: st.x, y: st.auto ? null : st.y});
+      },
       get autoFit() { return S.auto; },
       get active() { return S.active; },
       view() { const g = geo(); return g ? view(g) : null; },

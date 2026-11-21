@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from app.db.base import SessionLocal
 from app.db.contract_sizes import load_contract_sizes
 from app.db.models_core import HedgedPosition, Strategy, Subaccount
+from app.db.models_silver import IndexCandle as MinuteCandle
 from app.db.models_gold import (
     AssetBalanceTimeseries,
     AssetPnlDaily,
@@ -57,6 +58,7 @@ from app.web.accounts import (
     sort_accounts,
 )
 from app.web.deps import CurrentUser, get_current_user
+from config.settings import get_settings
 
 router = APIRouter(prefix="/api", tags=["reports"])
 
@@ -167,6 +169,9 @@ def filters(user: CurrentUser = Depends(get_current_user)) -> dict:
     return {"underlyings": underlyings, "strategies": strategies, "assets": assets,
             "subaccounts": subs, "accounts": accounts, "by_account": by_account,
             "is_admin": user.is_admin,
+            # build 19: the open tab redraws its graphs at the pipeline cadence (new data can't
+            # arrive faster than the pipeline writes it)
+            "refresh_seconds": get_settings().pipeline_interval_seconds,
             "periods": ["mtd", "ytd", "all", "7d", "30d", "90d"],
             "defaults": {"underlying": default_ul, "subaccount": first}}
 
@@ -341,11 +346,16 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
         candles, last = [], None
         if cex:
             candles = _candles(s, cex, chosen, bar_used, t0, t1)
-            last = s.execute(
-                select(IndexCandle.ts, IndexCandle.close, IndexCandle.n_minutes)
-                .where(IndexCandle.cex_code == cex, IndexCandle.inst_id == chosen,
-                       IndexCandle.bar == "1h")
-                .order_by(IndexCandle.ts.desc()).limit(1)).first()
+            # build 19: the last price = the close of the newest 1-minute candle, timed at that
+            # minute's END (the close is the price then) — read from silver: exact even when the
+            # hour has missing minutes (the old "1h bar ts + n_minutes − 1" was a minute early,
+            # and wrong after a gap). Same pipeline run as gold, so it equals the last bar's close.
+            m = s.execute(
+                select(MinuteCandle.ts, MinuteCandle.close)
+                .where(MinuteCandle.cex_code == cex, MinuteCandle.inst_id == chosen,
+                       MinuteCandle.bar == "1m")
+                .order_by(MinuteCandle.ts.desc()).limit(1)).first()
+            last = (m[0] + timedelta(minutes=1), m[1]) if m else None
         coin_ul = (chosen or "").split("-")[0] or None
         q_rows = s.execute(select(HedgedPosition.qty).where(
             HedgedPosition.subaccount_id.in_(subs), HedgedPosition.ccy == coin_ul)
@@ -357,7 +367,7 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
     # build 18: the future-PnL panel — the open legs of the boxes in the legend (period filter)
     in_legend = [(lg, box_key.get((lg.subaccount_id, lg.strategy_id))) for lg, _d in pairs]
     hedge = _hedge_block(in_legend, now, _f(last[1]) if last else None,
-                         _iso(last[0] + timedelta(minutes=int(last[2]) - 1)) if last else None,
+                         _iso(last[0]) if last else None,
                          sum(_f(q) for q in q_rows) if q_rows else None, coin_ul, acct_name)
     box_legs: dict[tuple, list] = defaultdict(list)   # the shown legs of each box → its split
     for _lg, dom in pairs:
@@ -402,8 +412,8 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
         "period": {"from": fd.isoformat() if fd else None, "till": td.isoformat() if td else None},
         "range": [_iso(t0), _iso(t1)],
         "candles": _candle_rows(candles),
-        "last": ({"t": _iso(last[0] + timedelta(minutes=int(last[2]) - 1)), "close": _f(last[1])}
-                 if last else None),
+        # build 19: t = the END of the newest 1-minute candle (its close is the price then)
+        "last": ({"t": _iso(last[0]), "close": _f(last[1])} if last else None),
         "boxes": out_boxes, "legs": out_legs, "exposure": exposure,
         "hedge": hedge,                              # build 18: the future-PnL panel
     }

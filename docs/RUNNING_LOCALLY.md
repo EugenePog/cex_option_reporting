@@ -512,6 +512,54 @@ pm2 restart pipeline   # web / worker need nothing
   `select pid, now() - query_start, wait_event, left(query, 60) from pg_stat_activity
   where wait_event_type = 'Lock' and query ilike '%gold.%';`
 
+### 10p. Premiums, fees and realized PnL in the PnL panel (build 21, migration 0027)
+
+**Nothing to re-collect.** The collectors store OKX's whole message in bronze, so the fields this
+build needs are already there for all history: positions `pnl` / `realizedPnl` (every snapshot) and
+fills `fillIdxPx`. Bronze is not touched; the pipeline reads them into new silver columns.
+
+1. Check what bronze holds (optional):
+
+   ```bash
+   docker exec -it cex_pg psql -U cex -d cex_option_reporting -c "
+   select count(*) rows, count(payload->>'realizedPnl') realized, count(payload->>'pnl') pnl
+     from bronze.raw_position;" -c "
+   select count(*) fills, count(payload->>'fillIdxPx') idx_px from bronze.raw_trade_fill;"
+   ```
+
+   Fills without `fillIdxPx` (if any) are priced from the 1-minute index candles instead.
+
+2. Upgrade:
+
+   ```bash
+   pm2 stop pipeline
+   make migrate          # 0027: 2 columns on silver.position_snapshot, 1 on silver.trade_fill,
+                         #       4 on gold.position_leg — adds columns, deletes nothing
+   make pipeline         # one-off: silver rewrites its existing snapshot / fill rows once to fill
+                         # the new columns (longer than a normal run), then gold computes the cash
+   pm2 restart pipeline web
+   ```
+
+3. Check the result:
+
+   ```bash
+   docker exec -it cex_pg psql -U cex -d cex_option_reporting -c "
+   select status, cash_source, count(*), round(sum(open_cash_usd)) open_usd,
+          round(sum(realized_cash_usd)) realized_usd, sum(cash_missing_px) unpriced
+     from gold.position_leg group by 1, 2 order by 1, 2;"
+   ```
+
+   `cash_source`: `fills` = from the trades (exact), `snapshots` = open legs replayed from position
+   snapshots (trades not all collected, e.g. opened before collection started, or the newest trade
+   not in yet — switches to `fills` after the next history run), `summary` = closed legs from
+   positions-history (whole fee at the closing price). `unpriced` should be 0.
+
+**On graph ①:** *Premiums & fees (open)* (on by default) and *Realized (closed)* (off by default) above the chart. Premiums
+on = open options counted from their entry with the premium received / paid and fees (so the V
+need not meet at today's price); Realized on = + realized PnL of options closed in the period. All
+in USD at the index price of each trade. The hover splits *Options* into *at expiry*, *premiums &
+fees (open)* and *realized in period*. Q (Settings → Position hedged) must not include option cash.
+
 ---
 
 ## Running everything as services (pm2)

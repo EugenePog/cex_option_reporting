@@ -103,4 +103,10 @@ html.fs-lock,html.fs-lock body{overflow:hidden}
 .pnl-tip tr.pos td:nth-child(n+2){color:#4ade80} .pnl-tip tr.neg td:nth-child(n+2){color:#f87171}
 .pnl-tip tr.help td:nth-child(n+2){color:#9fd08a} .pnl-tip tr.cost td:nth-child(n+2){color:#e0a39a}
 .pnl-tip .pnl-n{color:var(--muted);font-size:11px;margin-top:2px}
+.pnl-tip tr.sub td{color:var(--muted);font-size:11.5px}
+.pnl-tip tr.sub td:first-child{padding-left:6px}
+/* build 21: the PnL panel's switches in graph ①'s bar */
+.rpbar .pnl-sw label{display:inline-flex;align-items:center;gap:5px;margin-left:10px;color:var(--text);
+  letter-spacing:0;text-transform:none;font-size:12.5px;cursor:pointer;white-space:nowrap}
+.rpbar .pnl-sw input{accent-color:var(--blue);margin:0}
 

@@ -47,6 +47,7 @@ from app.domain.boxes import (
     in_period,
 )
 from app.domain.hedge import OptionLeg, hedge_profile
+from app.domain.hedge import payoff as leg_payoff   # `payoff` is graph ③'s endpoint
 from app.domain.metrics import deal_metrics, equity_metrics
 from app.domain.instruments import OPTION_SETTLE_UTC as OKX_SETTLE_UTC  # 08:00 UTC on expiry day
 from app.domain.pricing import black76_price, payoff_intrinsic
@@ -427,12 +428,32 @@ def _hedge_block(rows, now: datetime, s0: float | None, s0_at: str | None, qty: 
     the boxes switched on in the legend, so the options part comes PER BOX: `boxes[key]` = that
     box's options-only profile (hedge_profile with Q = 0); the page adds Q·(S − S0) and the visible
     boxes. Q comes from core.hedged_position (Settings → Position hedged); not set → 0, `qty_set`
-    false."""
+    false.
+
+    build 21 — the two switches above the panel, per box (USD at operation-time prices, gold
+    `open_cash_usd` / `realized_cash_usd`, app.domain.leg_cash):
+      * `open_cash`   premium received (+) / paid (−) and fees of its open options;
+      * `entry_shift` what "Premiums & fees" adds to the profile: the open options counted from
+                      their entry instead of from now = Σ n·payoff(S0) + open_cash (a constant);
+      * `realized`    what "Realized" adds: realized PnL of its closed options (closed legs in the
+                      period) and of the closed part of its open ones."""
     by_box: dict[int, list[OptionLeg]] = defaultdict(list)
+    cash: dict[int, dict] = defaultdict(lambda: {"open_cash": 0.0, "entry_shift": 0.0,
+                                                 "realized": 0.0, "n_closed": 0, "n_no_cash": 0})
     skipped, lines = 0, []
     for lg, key in rows:
         ot = (lg.opt_type or "").upper()
-        if key is None or lg.status != "open" or lg.strike is None or ot not in ("C", "P"):
+        if key is None or lg.strike is None or ot not in ("C", "P"):
+            continue
+        if lg.status == "closed":                     # build 21: realized only
+            c = cash[key]
+            c["n_closed"] += 1
+            if lg.realized_cash_usd is None:
+                c["n_no_cash"] += 1
+            else:
+                c["realized"] += _f(lg.realized_cash_usd)
+            continue
+        if lg.status != "open":
             continue
         if lg.expires_at is not None and lg.expires_at <= now:
             continue                                  # expired, close not collected yet
@@ -441,14 +462,24 @@ def _hedge_block(rows, now: datetime, s0: float | None, s0_at: str | None, qty: 
             skipped += 1                              # no coin size (ct_val) or side: left out
             continue
         size = abs(_f(lg.size_coin)) * (1 if side == "long" else -1)
-        by_box[key].append(OptionLeg(strike=_f(lg.strike), opt_type=ot, size=size))
+        leg = OptionLeg(strike=_f(lg.strike), opt_type=ot, size=size)
+        by_box[key].append(leg)
+        c = cash[key]
+        if lg.open_cash_usd is None:
+            c["n_no_cash"] += 1
+        c["open_cash"] += _f(lg.open_cash_usd)
+        c["realized"] += _f(lg.realized_cash_usd)     # partial closes of an open leg
+        if s0 is not None:
+            c["entry_shift"] += size * leg_payoff(s0, leg) + _f(lg.open_cash_usd)
         lines.append({"id": lg.position_leg_id, "box": key, "inst_id": lg.inst_id,
                       "strike": _f(lg.strike), "opt_type": ot, "side": side,
-                      "size_coin": abs(size), "expires_at": _iso(lg.expires_at)})
+                      "size_coin": abs(size), "expires_at": _iso(lg.expires_at),
+                      "open_cash_usd": _num(lg.open_cash_usd), "cash_source": lg.cash_source})
     out = {"coin": coin, "account": account, "qty": qty, "qty_set": qty is not None,
            "ref_px": s0, "ref_at": s0_at, "legs": lines, "n_skipped": skipped, "boxes": {}}
     if s0 is not None:
-        out["boxes"] = {key: hedge_profile(legs, 0.0, s0) for key, legs in by_box.items()}
+        out["boxes"] = {key: {**hedge_profile(by_box.get(key, []), 0.0, s0), **cash[key]}
+                        for key in sorted(set(by_box) | set(cash))}
     return out
 
 

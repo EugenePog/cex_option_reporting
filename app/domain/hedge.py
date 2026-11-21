@@ -160,14 +160,17 @@ def profile_at(profile: dict, s: float) -> dict:
     raise AssertionError("unreachable")
 
 
-def combine_profiles(box_profiles: list[dict], qty: float, s0: float) -> dict:
+def combine_profiles(box_profiles: list[dict], qty: float, s0: float, shift: float = 0.0) -> dict:
     """One profile from options-only box profiles (hedge_profile with Q = 0) + Q·(S − S0): the
-    points are S0 and every box's points, the values and slopes the sums (O is additive)."""
+    points are S0 and every box's points, the values and slopes the sums (O is additive).
+    build 21: `shift` = the constant the switches add to the options (premiums & fees of the open
+    options counted from entry, realized PnL) — it moves "with options" only, never "coin only"."""
     pxs = sorted({float(s0), *(p["px"] for pr in box_profiles for p in pr["points"])})
     points = []
     for px in pxs:
         opt = sum(profile_at(pr, px)["hedged"] for pr in box_profiles)
-        points.append({"px": px, "hedged": qty * (px - s0) + opt, "btc_only": qty * (px - s0)})
+        points.append({"px": px, "hedged": qty * (px - s0) + opt + shift,
+                       "btc_only": qty * (px - s0)})
     return {"points": points,
             "slope_below": {"hedged": qty + sum(pr["slope_below"]["hedged"] for pr in box_profiles),
                             "btc_only": qty},

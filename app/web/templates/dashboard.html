@@ -15,22 +15,15 @@
 <div class="grid" style="margin-bottom:18px">
   <div class="card" data-fs="c-pricebox">
     <h2>① Price with strategy boxes</h2>
-    <p class="hint fs-hide">Index price with every box drawn on it: each line is an option leg at its strike, from
-      open time (tick) to expiry (tick) — closed early: a dot at the close, then dashed to expiry; the shaded
-      side is where the leg pays off — above a call, below a put; green = bought, red = sold. The box covers
-      all its legs; its label splits the size: C = calls, P = puts, + bought, − sold; each line shows its
-      own size, <span style="color:#22c55e">+ bought</span> / <span style="color:#ef4444">− sold</span> (above a call, below a put).
-      Below: open size over time — calls above 0, puts below; green = long, red = short (a leg counts
-      until it is closed). Sizes in coin (BTC). Times in UTC.<br>
-      Right of the chart: <b>PnL at expiry</b> if the price ends at that level — the account's hedged
-      amount Q (Settings → Position hedged) with the open options of the boxes in the legend (switch a box off
-      there and its options drop out), from the current price, no premiums.
-      Width = size of the PnL: <span style="color:#22c55e">profit</span> / <span style="color:#ef4444">loss</span>
-      with options; out to the coin alone (no options): <span style="color:#7fb069">options save</span> /
-      <span style="color:#c98a80">options cost</span>. White lines: open strikes. Hover for USD and coin; click to pin.<br>Navigate like TradingView: drag the chart to move; click it, then use the wheel to zoom
-      (trackpad: two fingers move / zoom, pinch zooms); drag or scroll the price / date scale to stretch it;
-      double-click to go back. More candles load as you move.
-      <b>?</b> under the price scale lists everything.</p>
+    <p class="hint fs-hide">Each line is an option leg at its strike, from open time (tick) to expiry (tick) —
+      closed early: a dot at the close, then dashed to expiry; the shaded side is where the leg pays off — above a
+      call, below a put; green = bought, red = sold, size of position shown on the line in coin (BTC). The box
+      covers all its legs. Times in UTC.<br>
+      Right of the chart: <b>PnL at expiry</b> if the price ends at that level — the account's hedged amount Q
+      (Settings → Position hedged) with the open options of the boxes in the legend (switch a box off there and its
+      options drop out), from the current price. <b>Premiums &amp; fees (open)</b>: open options counted from their
+      entry, with the premium received / paid and fees; <b>Realized (closed)</b>: + realized PnL of options closed
+      in the period — both in USD at the index price of each trade.</p>
     <div class="rpbar">
       <label>Reporting period</label>
       <select id="rp-pb">
@@ -51,6 +44,11 @@
         <option value="1do" selected>1D (option)</option>
       </select>
       <span id="pb-bar-range" class="bar-range"></span></span>
+      <!-- build 21: what the PnL panel adds to the options (USD at the prices of the operations) -->
+      <span class="rp-group pnl-sw">
+        <label title="Open options counted from their entry: + premium received / − paid and − fees, each in USD at the index price of its trade"><input type="checkbox" id="pb-prem" checked> Premiums &amp; fees (open)</label>
+        <label title="Realized PnL of the options closed in the period (and of closed parts of open ones): opening at the opening prices, closing and fees at the closing prices"><input type="checkbox" id="pb-real"> Realized (closed)</label>
+      </span>
     </div>
     <p class="hint" id="pb-meta" style="margin-top:-4px"></p>
     <div id="c-pricebox" class="chart" style="height:580px"></div>
@@ -153,6 +151,8 @@ async function boot() {
   document.getElementById("f-asset").onchange = () => renderAssetEquity();
   document.getElementById("f-expiry").onchange = () => renderPayoff();
   document.getElementById("pb-bar").onchange = () => { pbShowRange(); renderPriceBoxes(); };
+  for (const id of ["pb-prem", "pb-real"])     // build 21: no reload — the panel recomputes
+    document.getElementById(id).onchange = () => pnlRefresh(document.getElementById("c-pricebox"));
   pbShowRange();
   setupPeriod("pb", renderPriceBoxes);  // same presets / default (Last 1 month) as graph ②
   document.getElementById("sync-1").onchange = () => renderEquity();
@@ -722,8 +722,9 @@ async function pbLoad(p){
 // USD and coin; click = pin it (click it again / Esc = unpin).
 const PNL = {h: null, prof: null, split: 0.84, range: null, pin: null, gd: null, keys: [], now: 0,
              trace0: -1, ann: -1, shape0: -1, sig: ""};
-const PNL_POS = "rgba(40,199,48,0.92)", PNL_NEG = "rgba(240,32,32,0.92)",
-      PNL_HELP = "rgba(72,124,58,0.92)", PNL_COST = "rgba(126,58,58,0.92)";
+// build 21: muted, close to the spreadsheet prototype (was neon 40,199,48 / 240,32,32 at 0.92)
+const PNL_POS = "rgba(58,160,86,0.78)", PNL_NEG = "rgba(196,72,72,0.78)",
+      PNL_HELP = "rgba(64,104,60,0.70)", PNL_COST = "rgba(112,62,58,0.70)";
 function pnlAt(S, prof){
   const pr = prof || PNL.prof, pts = pr.points, K = ["hedged", "btc_only"], o = {};
   const ext = (p, k) => { for (const key of K) o[key] = p[key] + k[key] * (S - p.px); return o; };
@@ -754,12 +755,27 @@ function pnlVisibleKeys(gd){
   const hidden = new Set(((gd && gd.data) || []).filter(t => t.visible === "legendonly").map(t => t.legendgroup));
   return Object.keys(PNL.h.boxes || {}).filter(k => !hidden.has("box" + k));
 }
-// one profile = Q·(S − S0) + the visible boxes' options-only profiles (combine_profiles in Python)
+// build 21: the two switches above the panel
+const pnlSw = () => ({prem: !!(document.getElementById("pb-prem") || {}).checked,
+                      real: !!(document.getElementById("pb-real") || {}).checked});
+// the switches' constants for the visible boxes: premiums & fees of the open options (counted from
+// entry instead of from now: + Σ n·payoff(S0) + their cash) and realized PnL (closed in the period)
+function pnlParts(keys){
+  const sw = pnlSw(), bx = keys.map(k => PNL.h.boxes[k]), sum = f => bx.reduce((t, b) => t + (f(b) || 0), 0);
+  const p = {sw, openCash: sum(b => b.open_cash), entry: sum(b => b.entry_shift), realized: sum(b => b.realized),
+             closed: sum(b => b.n_closed), noCash: sum(b => b.n_no_cash)};
+  p.shift = (sw.prem ? p.entry : 0) + (sw.real ? p.realized : 0);
+  return p;
+}
+// one profile = Q·(S − S0) + the visible boxes' options-only profiles + the switches' constant
+// (combine_profiles in Python)
 function pnlCombine(keys){
   const h = PNL.h, q = h.qty || 0, s0 = h.ref_px, prs = keys.map(k => h.boxes[k]);
+  PNL.parts = pnlParts(keys);
+  const shift = PNL.parts.shift;
   const pxs = [...new Set([s0, ...prs.flatMap(pr => pr.points.map(p => p.px))])].sort((a, b) => a - b);
   const sum = (f) => prs.reduce((t, pr) => t + f(pr), 0);
-  return {points: pxs.map(px => ({px, btc_only: q * (px - s0), hedged: q * (px - s0) + sum(pr => pnlAt(px, pr).hedged)})),
+  return {points: pxs.map(px => ({px, btc_only: q * (px - s0), hedged: q * (px - s0) + sum(pr => pnlAt(px, pr).hedged) + shift})),
           slope_below: {hedged: q + sum(pr => pr.slope_below.hedged), btc_only: q},
           slope_above: {hedged: q + sum(pr => pr.slope_above.hedged), btc_only: q}};
 }
@@ -785,7 +801,9 @@ const PNL_STYLE = [{fill: "toself", fillcolor: PNL_POS, line: {width: 0}}, {fill
 function pnlHead(){
   const h = PNL.h, c = escH(h.coin || ""), legs = h.legs.filter(l => PNL.keys.includes(String(l.box))).length;
   if (!PNL.prof) return "PnL at expiry<br>no current price";
-  return `PnL at expiry<br>${h.qty_set ? `Q ${pbNum(h.qty)} ${c}` : "Q not set"} · ${plural(legs, "leg", "legs")}`;
+  const sw = (PNL.parts || {}).sw || {}, closed = (PNL.parts || {}).closed || 0;
+  return `PnL at expiry<br>${h.qty_set ? `Q ${pbNum(h.qty)} ${c}` : "Q not set"} · ${plural(legs, "leg", "legs")}` +
+    (sw.prem || sw.real ? `<br>${[sw.prem ? "+ premiums" : "", sw.real ? `+ realized (${closed})` : ""].filter(Boolean).join(" · ")}` : "");
 }
 // white lines: the open strikes of the visible boxes (one per strike) + S0 dashed, now → the panel
 function pnlShapes(){
@@ -807,7 +825,7 @@ function pnlShapes(){
 function pnlBuild(h, nowMs, traces, ann){
   PNL.h = h; PNL.now = nowMs; PNL.pin = null; PNL.range = null;
   PNL.keys = h ? Object.keys(h.boxes || {}) : [];
-  PNL.sig = PNL.keys.join(",");
+  PNL.sig = PNL.keys.join(",") + `|${pnlSw().prem}|${pnlSw().real}`;
   PNL.prof = h && h.ref_px != null ? pnlCombine(PNL.keys) : null;
   PNL.trace0 = traces.length;
   const F = PNL.prof ? pnlData() : PNL_STYLE.map(() => ({x: [], y: []}));
@@ -820,7 +838,7 @@ function pnlBuild(h, nowMs, traces, ann){
 // a legend click: rebuild the profile from the boxes now switched on (20 Nov)
 function pnlRefresh(gd){
   if (!PNL.prof || PNL.trace0 < 0) return;
-  const keys = pnlVisibleKeys(gd), sig = keys.join(",");
+  const keys = pnlVisibleKeys(gd), sw = pnlSw(), sig = keys.join(",") + `|${sw.prem}|${sw.real}`;
   if (sig === PNL.sig) return;                  // our own restyle, or another trace toggled
   PNL.sig = sig; PNL.keys = keys; PNL.prof = pnlCombine(keys); PNL.range = null;
   const F = pnlData(), idx = F.map((_, i) => PNL.trace0 + i);
@@ -850,6 +868,7 @@ const pnlUsd = v => (v < -0.5 ? "−" : v > 0.5 ? "+" : "") + "$" + Math.abs(v).
 const pnlCoin = (v, S) => { const x = S > 0 ? v / S : 0; return (x < -5e-5 ? "−" : x > 5e-5 ? "+" : "") + Math.abs(x).toFixed(4); };
 function pnlText(S){
   const h = PNL.h, v = pnlAt(S), o = v.hedged - v.btc_only, s0 = h.ref_px, c = escH(h.coin || "");
+  const pp = PNL.parts || {sw: {}};
   const mv = (S / s0 - 1) * 100, row = (name, x, cls) =>
     `<tr${cls ? ` class="${cls}"` : ""}><td>${name}</td><td>${pnlUsd(x)}</td><td>${pnlCoin(x, S)} ${c}</td></tr>`;
   let note = "";
@@ -862,9 +881,15 @@ function pnlText(S){
   return `<div class="pnl-h"><b>${c} at ${Math.round(S).toLocaleString()}</b> <span>${mv >= 0 ? "+" : "−"}${Math.abs(mv).toFixed(1)}% from ${fmtPx(s0)}</span></div>` +
     `<table>${row("With options", v.hedged, v.hedged >= 0 ? "pos" : "neg")}` +
     (h.qty_set ? row(`${c} only (Q ${pbNum(h.qty)})`, v.btc_only) : "") +
-    row("Options", o, o > 0 ? "help" : o < 0 ? "cost" : "") + `</table>` +
+    row("Options", o, o > 0 ? "help" : o < 0 ? "cost" : "") +
+    // build 21: what the options are made of when a switch is on
+    (pp.sw.prem || pp.sw.real ? row("&nbsp;· at expiry", o - (pp.sw.prem ? pp.openCash : 0) - (pp.sw.real ? pp.realized : 0), "sub") : "") +
+    (pp.sw.prem ? row("&nbsp;· premiums &amp; fees (open)", pp.openCash, "sub") : "") +
+    (pp.sw.real ? row(`&nbsp;· realized in period (${pp.closed} closed)`, pp.realized, "sub") : "") + `</table>` +
     (note ? `<div class="pnl-n">${note}</div>` : "") +
-    `<div class="pnl-n">at expiry · intrinsic only, no premiums · from ${fmtUtc(h.ref_at)}</div>`;
+    `<div class="pnl-n">at expiry, intrinsic only · ${pp.sw.prem ? "open options from entry" : "open options from now"}` +
+    `${pp.sw.prem || pp.sw.real ? " · premiums, fees, realized in USD at the prices of the trades" : " · no premiums"}` +
+    `${pp.noCash ? ` · ${plural(pp.noCash, "leg", "legs")} without cash data` : ""} · from ${fmtUtc(h.ref_at)}</div>`;
 }
 // geometry of the panel in the chart's pixels (null when not drawn)
 function pnlGeo(gd){

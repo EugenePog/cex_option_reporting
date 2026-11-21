@@ -361,6 +361,13 @@ class PositionLeg(Base):
     ct_val: Mapped[float | None] = mapped_column(Numeric, nullable=True)       # coin per contract
     size_coin: Mapped[float | None] = mapped_column(Numeric, nullable=True)    # size × ct_val
     coin: Mapped[str | None] = mapped_column(String(16), nullable=True)        # e.g. BTC
+    # build 21 (0027): option cash in USD at operation-time prices (app.domain.leg_cash) — the
+    # future-PnL switches of graph ①: A = premium + fees of the still-open quantity (+ received /
+    # − paid), B = realized PnL of the closed quantity; where from; events without a price
+    open_cash_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    realized_cash_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    cash_source: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    cash_missing_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class BoxShape(Base):

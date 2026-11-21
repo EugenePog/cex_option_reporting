@@ -57,10 +57,20 @@ from app.db.models_silver import (
     ClosedPosition,
     PositionLeg,
     PositionSnapshot,
+    TradeFill,
 )
 from app.domain.boxes import BAR_OFFSET, BAR_STEP, BARS, Leg, build_boxes
 from app.domain.contracts import ContractSizes, inst_type_of
 from app.domain.instruments import expires_at
+from app.domain.leg_cash import (
+    Fill,
+    LegCash,
+    LegInfo,
+    Snap,
+    fill_events,
+    fills_cover,
+    leg_cash,
+)
 from app.domain.metrics import deal_metrics, equity_metrics
 
 logger = logging.getLogger(__name__)
@@ -384,7 +394,9 @@ def _build_position_leg(s, rates: _CoinUsd, sizes: ContractSizes) -> tuple[int, 
     box_shape)."""
     n = 0
     legs: list[Leg] = []
-    for lg in s.execute(select(PositionLeg)).scalars():
+    rows = s.execute(select(PositionLeg)).scalars().all()
+    cash = _leg_cash_all(s, rows, rates, sizes)          # build 21: graph ① premium / realized
+    for lg in rows:
         itype = inst_type_of(lg.inst_id)
         ct_val = sizes.ct_val(lg.cex_code, lg.underlying, itype)
         size_coin = (_fl(lg.size) * ct_val) if (ct_val is not None and lg.size is not None) \
@@ -410,6 +422,10 @@ def _build_position_leg(s, rates: _CoinUsd, sizes: ContractSizes) -> tuple[int, 
             realized_pnl_usd=realized_usd, upl=lg.upl, upl_usd=upl_usd,
             fee=lg.fee, ccy=lg.ccy, n_fills=lg.n_fills, n_snapshots=lg.n_snapshots,
             expires_at=exp_at, ct_val=ct_val, size_coin=size_coin, coin=coin,
+            open_cash_usd=cash[lg.id].open_usd if lg.id in cash else None,
+            realized_cash_usd=cash[lg.id].realized_usd if lg.id in cash else None,
+            cash_source=cash[lg.id].source if lg.id in cash else None,
+            cash_missing_px=cash[lg.id].missing_px if lg.id in cash else None,
         ))
         legs.append(Leg(
             leg_id=lg.id, subaccount_id=lg.subaccount_id, strategy_id=lg.strategy_id,
@@ -421,6 +437,102 @@ def _build_position_leg(s, rates: _CoinUsd, sizes: ContractSizes) -> tuple[int, 
         ))
         n += 1
     return n, legs
+
+
+def _opt(v) -> float | None:
+    return float(v) if v is not None else None
+
+
+def _leg_cash_all(s, rows, rates: _CoinUsd, sizes: ContractSizes) -> dict[int, LegCash]:
+    """build 21 — per leg A (premium + fees of the open quantity) and B (realized) in USD at
+    operation-time prices (app.domain.leg_cash): trades from silver.trade_fill (their fillIdxPx),
+    position snapshots replayed for open legs whose trades are not all there, positions-history
+    otherwise. Other prices: the middle of the 1-minute index candle of that minute
+    (silver.index_candle), else the day's coin rate; expiries at the official settlement price."""
+    fills: dict[int, list[Fill]] = defaultdict(list)
+    for f in s.execute(select(TradeFill).where(TradeFill.position_leg_id.isnot(None))).scalars():
+        if f.filled_at is None or f.size is None or f.price is None:
+            continue
+        fills[f.position_leg_id].append(Fill(
+            at=f.filled_at, side=f.side or "", size=float(f.size), price=float(f.price),
+            fee=_fl(f.fee), fee_ccy=f.fee_ccy, idx_px=_opt(f.idx_px)))
+    s.flush()                                            # this run's expiry_settlement rows
+    settle = {(e.subaccount_id, e.underlying, e.expiry): _opt(e.settle_price)
+              for e in s.execute(select(ExpirySettlement)).scalars()}
+
+    def info(lg, snaps=()) -> LegInfo:
+        return LegInfo(status=lg.status, side=lg.side, opened_at=lg.pos_opened_at,
+                       closed_at=lg.closed_at,
+                       close_type=_close_type(lg.close_type) if lg.close_type is not None else None,
+                       size=_opt(lg.size), entry_px=_opt(lg.entry_px), fee=_opt(lg.fee),
+                       realized_pnl=_opt(lg.realized_pnl), fills=fills.get(lg.id, ()), snaps=snaps)
+
+    def ct(lg):
+        return sizes.ct_val(lg.cex_code, lg.underlying, inst_type_of(lg.inst_id))
+
+    # open legs whose trades don't account for the position → replay their snapshots (change
+    # points only: the rows where size, average price, fee or PnL moved)
+    need = [lg.id for lg in rows if lg.status == "open" and ct(lg) is not None
+            and not fills_cover(fill_events(fills.get(lg.id, ()), lg.side, ct(lg), lambda _a: None),
+                                info(lg), _fl(lg.size) * ct(lg))]
+    snaps: dict[int, list[Snap]] = defaultdict(list)
+    if need:
+        for r in s.execute(text("""
+            SELECT position_leg_id, captured_at, abs(size) AS size, avg_px, fee, pnl, realized_pnl,
+                   idx_px
+              FROM (SELECT p.*, row_number() OVER w AS rn,
+                           lag(size) OVER w AS l_size, lag(avg_px) OVER w AS l_avg,
+                           lag(fee) OVER w AS l_fee, lag(pnl) OVER w AS l_pnl,
+                           lag(realized_pnl) OVER w AS l_real
+                      FROM silver.position_snapshot p
+                     WHERE p.position_leg_id = ANY(:ids)
+                    WINDOW w AS (PARTITION BY p.position_leg_id ORDER BY p.captured_at)) x
+             WHERE rn = 1 OR size IS DISTINCT FROM l_size OR avg_px IS DISTINCT FROM l_avg
+                OR fee IS DISTINCT FROM l_fee OR pnl IS DISTINCT FROM l_pnl
+                OR realized_pnl IS DISTINCT FROM l_real
+             ORDER BY position_leg_id, captured_at"""), {"ids": need}):
+            snaps[r.position_leg_id].append(Snap(
+                at=r.captured_at, size=_fl(r.size), avg_px=_opt(r.avg_px), fee=_opt(r.fee),
+                pnl=_opt(r.pnl), realized_pnl=_opt(r.realized_pnl), idx_px=_opt(r.idx_px)))
+
+    def minute(at: datetime) -> datetime:
+        return at.replace(second=0, microsecond=0)
+
+    def compute(px_of) -> dict[int, LegCash]:
+        out = {}
+        for lg in rows:
+            c = ct(lg)
+            if c is None:
+                continue
+            coin = lg.ccy or _asset_of(lg.underlying)
+
+            def px_at(at, lg=lg, coin=coin):
+                return px_of(lg, coin, at) if at is not None else None
+            sp = settle.get((lg.subaccount_id, lg.underlying, lg.expiry))
+            r = leg_cash(info(lg, snaps.get(lg.id, ())), c, _fl(lg.size) * c, px_at, sp)
+            if r is not None:
+                out[lg.id] = r
+        return out
+
+    # pass 1 records which minutes need a candle; one query fetches them; pass 2 prices
+    wanted: set[tuple[str, str, datetime]] = set()
+    compute(lambda lg, coin, at: wanted.add((lg.cex_code, lg.underlying, minute(at))))
+    mids: dict[tuple[str, str, datetime], float] = {}
+    if wanted:
+        for r in s.execute(text("""
+            SELECT cex_code, inst_id, ts, (high + low) / 2 AS mid FROM silver.index_candle
+             WHERE bar = '1m' AND ts = ANY(:ts)"""), {"ts": sorted({w[2] for w in wanted})}):
+            mids[(r.cex_code, r.inst_id, r.ts)] = float(r.mid)
+
+    def priced(lg, coin, at):
+        m = mids.get((lg.cex_code, lg.underlying, minute(at)))
+        if m is not None:
+            return m
+        # no candle for that minute: the account's coin rate of the nearest day, if it has any
+        # (never the 1.0 the rate table falls back to for unknown coins)
+        return rates.rate(lg.subaccount_id, coin, at.date()) \
+            if (lg.subaccount_id, coin) in rates._by_cc else None
+    return compute(priced)
 
 
 def _build_box_shape(s, legs: list[Leg], now: datetime) -> int:

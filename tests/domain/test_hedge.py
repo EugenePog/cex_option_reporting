@@ -18,6 +18,7 @@ from app.domain.hedge import (
     hedge_profile,
     hedged_pnl,
     options_effect,
+    payoff,
     profile_at,
 )
 
@@ -136,3 +137,14 @@ def test_boxes_add_up_to_the_whole_book_and_a_hidden_box_drops_out():
         assert abs(profile_at(both, s)["hedged"] - hedged_pnl(BOOK, Q, S0, s)) < 1e-9, s
         assert abs(profile_at(only_a, s)["hedged"] - hedged_pnl(box_a, Q, S0, s)) < 1e-9, s
     assert combine_profiles([], Q, S0)["points"] == [{"px": S0, "hedged": 0.0, "btc_only": 0.0}]
+
+
+def test_switches_shift_the_profile_by_a_constant():
+    # build 21: from entry (premiums) = from now + Σ n·payoff(S0) + premium cash; realized adds on
+    pa = hedge_profile(BOOK, 0.0, S0)
+    entry = sum(lg.size * payoff(S0, lg) for lg in BOOK) + 37.5        # 37.5 = net premium & fees
+    pr = combine_profiles([pa], Q, S0, shift=entry + 12.0)              # 12 = realized
+    for s in [70, 95, 100, 130]:
+        from_entry = Q * (s - S0) + sum(lg.size * payoff(s, lg) for lg in BOOK) + 37.5 + 12.0
+        assert abs(profile_at(pr, s)["hedged"] - from_entry) < 1e-9, s
+        assert profile_at(pr, s)["btc_only"] == Q * (s - S0)

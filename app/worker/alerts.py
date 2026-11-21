@@ -14,6 +14,11 @@ pm2 process `worker` (`python -m app.cli worker --loop`). One check (`run_once`)
      the messages Telegram accepted, plus the re-arm / skip updates. A message that failed is not
      stored, so it is tried again on the next check.
 
+  5. build 17: no-data notifications (codes no_data_warning / no_data_error, per exchange × asset
+     of the alive boxes): "⚠ alerts can't check ASSET: no price for X min" when the newest price
+     (live ticker, else stored candle) is older than the code's threshold — sent once per outage,
+     "✅ … again" when a fresh price is back (core.notification_feed_state).
+
 `dry_run` prints the messages instead and changes nothing. The loop runs every
 ALERTS_INTERVAL_SECONDS (default 60 s); an advisory try-lock keeps two workers from double-sending.
 """
@@ -30,18 +35,29 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db.base import session_scope
-from app.db.models_core import NotificationSetting, NotificationState, Strategy, Subaccount
+from app.db.models_core import (
+    NotificationFeedState,
+    NotificationSetting,
+    NotificationState,
+    Strategy,
+    Subaccount,
+)
 from app.db.models_gold import BoxShape
 from app.db.models_gold import PositionLeg as GoldPositionLeg
 from app.db.models_silver import IndexCandle as SilverIndexCandle
 from app.domain.alerts import (
     AlertBox,
     Evaluation,
+    Feed,
+    FeedEvaluation,
+    FeedKey,
+    FeedState,
     Price,
     Setting,
     State,
     StateKey,
     evaluate,
+    evaluate_no_data,
     is_alive,
     setup_message,
 )
@@ -174,9 +190,51 @@ def current_prices(s, pairs: set[tuple[str, str]], now: datetime, max_age: timed
     return out
 
 
+def price_feeds(s, alive: list[AlertBox], prices: dict[tuple[str, str], Price | None],
+                now: datetime) -> list[Feed]:
+    """What the worker has for every exchange × asset of the alive boxes (build 17): the price it
+    uses, or — when there is none — the newest stored candle of any age (for the price's age)."""
+    n_boxes: dict[tuple[str, str], int] = defaultdict(int)
+    for b in alive:
+        n_boxes[(b.cex_code, b.underlying)] += 1
+    feeds = []
+    for (cex, asset), n in sorted(n_boxes.items()):
+        p = prices.get((cex, asset))
+        if p is not None:
+            feeds.append(Feed(cex, asset, p.at, p.source, usable=True, n_boxes=n))
+            continue
+        stored = stored_candle_price(s, cex, asset, now)
+        feeds.append(Feed(cex, asset, stored[1] if stored else None,
+                          "candle" if stored else None, usable=False, n_boxes=n))
+    return feeds
+
+
+def load_feed_states(s, feeds: list[Feed]) -> dict[FeedKey, FeedState]:
+    if not feeds:
+        return {}
+    pairs = {(f.cex_code, f.asset) for f in feeds}
+    return {(r.cex_code, r.asset, r.code): FeedState(
+                armed=bool(r.armed), sent=bool(r.sent), last_sent_at=r.last_sent_at,
+                last_value=_num(r.last_value), last_message=r.last_message)
+            for r in s.execute(select(NotificationFeedState).where(
+                NotificationFeedState.asset.in_({a for _c, a in pairs}))).scalars()
+            if (r.cex_code, r.asset) in pairs}
+
+
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
+def save_feed_states(s, states: dict[FeedKey, FeedState], now: datetime) -> None:
+    for (cex, asset, code), st in states.items():
+        values = dict(cex_code=cex, asset=asset, code=code, armed=st.armed, sent=st.sent,
+                      last_sent_at=st.last_sent_at, last_value=st.last_value,
+                      last_message=st.last_message, updated_at=now)
+        stmt = pg_insert(NotificationFeedState).values(**values)
+        s.execute(stmt.on_conflict_do_update(
+            index_elements=["cex_code", "asset", "code"],
+            set_={k: stmt.excluded[k] for k in values if k not in ("cex_code", "asset", "code")}))
+
+
 def save_states(s, states: dict[StateKey, State], now: datetime) -> None:
     for (sub, strat, uly, code), st in states.items():
         values = dict(subaccount_id=sub, strategy_id=strat, underlying=uly, code=code,
@@ -252,22 +310,37 @@ def run_once(now: datetime | None = None, dry_run: bool = False,
             ev: Evaluation = evaluate(boxes, settings, prices, states, now,
                                       rearm=timedelta(minutes=cfg.alerts_rearm_minutes),
                                       grace=grace)
+            # build 17: can the worker check at all? (no-data codes, per exchange × asset)
+            feeds = price_feeds(s, alive, prices, now)
+            fev: FeedEvaluation = evaluate_no_data(feeds, settings, load_feed_states(s, feeds), now)
 
+        # the no-data messages first: they say the box alerts below may be missing
+        messages = [m.message for m in fev.messages] + [a.message for a in ev.alerts]
         if dry_run:
-            res.dry_run = [a.message for a in ev.alerts]
+            res.dry_run = messages
             return res
 
-        ok = send_many([a.message for a in ev.alerts]) if ev.alerts else []
+        ok = send_many(messages) if messages else []
+        ok_feed, ok_box = ok[:len(fev.messages)], ok[len(fev.messages):]
         to_store = dict(ev.updates)
-        for alert, accepted in zip(ev.alerts, ok, strict=True):
+        feed_store = dict(fev.updates)
+        for fm, accepted in zip(fev.messages, ok_feed, strict=True):
+            if accepted:
+                if fm.state_key is not None and fm.new_state is not None:
+                    feed_store[fm.state_key] = fm.new_state
+                res.sent.append(fm.message)
+            else:
+                res.failed.append(fm.message)       # not stored → tried again on the next check
+        for alert, accepted in zip(ev.alerts, ok_box, strict=True):
             if accepted:
                 to_store[alert.state_key] = alert.new_state
                 res.sent.append(alert.message)
             else:
                 res.failed.append(alert.message)
-        if to_store:
+        if to_store or feed_store:
             with session_scope() as s:
                 save_states(s, to_store, now)
+                save_feed_states(s, feed_store, now)
     if res.sent or res.failed:
         logger.info("alerts: %d sent, %d failed (%d alive boxes of %d)", len(res.sent),
                     len(res.failed), res.alive, res.boxes)

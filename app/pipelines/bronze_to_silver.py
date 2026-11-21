@@ -30,6 +30,16 @@ Build 15 (speed; same results):
     small and its updated_at is the Box builder's "as of" time, so it is refreshed every run;
   * source_fingerprint() lets the pipeline loop skip the whole stage when nothing it reads has
     changed (see app/pipelines/runner.py).
+
+Build 17 (alerts): a snapshot run that is STILL BEING WRITTEN (bronze.ingest_run status RUNNING,
+started less than IN_PROGRESS_MAX ago) is left out of raw_position and of "the newest snapshot
+run". The collector writes positions, then balances, then margin, then greeks, each in its own
+transaction; before, a pipeline run that came between them saw the new positions but the previous
+balance run as the newest one, marked every leg "stale", the box looked closed to the alerts worker
+for one pipeline cycle — its price alerts were not checked and got re-armed (repeated messages).
+Now such a run is picked up by the next pipeline run, once it has finished (its finish changes the
+source fingerprint). A run still RUNNING after IN_PROGRESS_MAX (a crashed collector) counts as
+finished again, so it can never freeze the legs; a run that ended in ERROR counts, as before.
 """
 from __future__ import annotations
 
@@ -73,6 +83,12 @@ from app.domain.strategy_rules import Resolution, Rule, TagRecord, resolve_strat
 logger = logging.getLogger(__name__)
 
 LegKey = tuple[str, int, str, datetime]   # (cex_code, subaccount_id, posId, cTime)
+
+# A RUNNING snapshot run younger than this is "still being written" and left out (build 17). A run
+# takes seconds; one still RUNNING after this is a crashed collector and counts as finished.
+IN_PROGRESS_MAX_MINUTES = 10
+_IN_PROGRESS_SQL = (f"SELECT ingest_id FROM bronze.ingest_run WHERE status = 'RUNNING' "
+                    f"AND started_at > now() - interval '{IN_PROGRESS_MAX_MINUTES} minutes'")
 
 
 
@@ -199,11 +215,19 @@ class _Bronze:
     positions: list
     closed: list
     fills: list
+    in_progress: frozenset[str] = frozenset()     # ingest_ids of runs still being written
+
+
+def _in_progress_runs(session) -> frozenset[str]:
+    return frozenset(session.execute(text(_IN_PROGRESS_SQL)).scalars())
 
 
 def _read_bronze(session) -> _Bronze:
+    running = _in_progress_runs(session)     # same snapshot as the reads below (run())
     return _Bronze(
-        positions=_read(session, RawPosition, _POS_FIELDS),
+        positions=[r for r in _read(session, RawPosition, _POS_FIELDS)
+                   if r.ingest_id not in running],
+        in_progress=running,
         closed=_read(session, RawClosedPosition, _CLOSED_FIELDS,
                      extra=(RawClosedPosition.ext_id, RawClosedPosition.pos_opened_at)),
         fills=_read(session, RawTradeFill, _FILL_FIELDS,
@@ -328,9 +352,11 @@ def _pos_side(size: float | None) -> str:
     return "short" if (size or 0) < 0 else ("long" if (size or 0) > 0 else "flat")
 
 
-def _latest_snapshot_runs(session, lk: _Lookups) -> dict[int, str]:
+def _latest_snapshot_runs(session, lk: _Lookups,
+                          in_progress: frozenset[str] = frozenset()) -> dict[int, str]:
     """subaccount_id -> ingest_id of its most recent snapshot run (balances are written on every
-    run, positions only when something is open — so the run is identified via raw_balance)."""
+    run, positions only when something is open — so the run is identified via raw_balance).
+    Runs still being written (build 17) don't count."""
     latest: dict[int, tuple[datetime, str]] = {}
     rows = session.execute(
         select(RawBalance.cex_code, RawBalance.account_label, RawBalance.subacct_name,
@@ -340,7 +366,7 @@ def _latest_snapshot_runs(session, lk: _Lookups) -> dict[int, str]:
     ).all()
     for cex, label, sub_name, ingest_id, cap in rows:
         sub_id = lk.resolve_subaccount(cex, label, sub_name)
-        if sub_id is None or cap is None:
+        if sub_id is None or cap is None or ingest_id in in_progress:
             continue
         if sub_id not in latest or cap > latest[sub_id][0]:
             latest[sub_id] = (cap, ingest_id)
@@ -368,7 +394,7 @@ def _collect_legs(session, lk: _Lookups, br: _Bronze) -> dict[LegKey, _Leg]:
             leg.entry_px = _f(pos.p_avgPx)
             leg.ccy = pos.p_ccy or leg.ccy
 
-    latest_run = _latest_snapshot_runs(session, lk)
+    latest_run = _latest_snapshot_runs(session, lk, br.in_progress)
     for leg in legs.values():
         if leg.last_ingest_id is not None and latest_run.get(leg.key[1]) == leg.last_ingest_id:
             leg.status = "open"
@@ -688,6 +714,10 @@ def source_fingerprint() -> tuple:
     parts = [f"(SELECT max(id) FROM {name(m)})" for m in _BRONZE_TABLES]
     run = name(IngestRun)
     parts.append(f"(SELECT count(*) || '/' || coalesce(max(finished_at)::text, '') FROM {run})")
+    # build 17: the runs left out as "still being written" — changes when one finishes or when a
+    # stuck one passes IN_PROGRESS_MAX_MINUTES and counts again
+    parts.append(f"(SELECT coalesce(string_agg(ingest_id, ',' ORDER BY ingest_id), '') "
+                 f"FROM ({_IN_PROGRESS_SQL}) r)")
     parts += [f"(SELECT md5(coalesce(string_agg(t::text, '|' ORDER BY t::text), '')) "
               f"FROM {name(m)} t)" for m in _CORE_TABLES]
     with session_scope() as s:
@@ -700,6 +730,11 @@ def run() -> dict[str, tuple[int, int]]:
     t0 = time.perf_counter()
     changed: dict[str, int] = {}
     with session_scope() as s:
+        # build 17: one snapshot of the database for every read of this run — the in-progress
+        # runs, raw_position and raw_balance (the newest run) are then consistent with each other
+        # even while a collector commits. Only the pipeline writes silver (under its lock), so
+        # REPEATABLE READ can't hit a write conflict here.
+        s.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         lk = _Lookups(s)
         if not lk.subaccount:
             logger.warning("no subaccounts found in core — seed core data first (make seed); "

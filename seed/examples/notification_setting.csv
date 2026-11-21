@@ -5,3 +5,5 @@ BTC-USD,near_top_pct,2,true,false,c: price reaches top strike - X % (X = thresho
 BTC-USD,near_bottom_pct,2,true,false,d: price reaches bottom strike + Y % (Y = threshold)
 BTC-USD,last_expiry,0,true,true,e: time reaches the last expiry of a box
 BTC-USD,last_expiry_days,1,true,false,f: time reaches last expiry - N days (N = threshold)
+BTC-USD,no_data_warning,10,true,false,g: no fresh price for X min (X = threshold, minutes)
+BTC-USD,no_data_error,30,true,true,h: no fresh price for X min (X = threshold, minutes)

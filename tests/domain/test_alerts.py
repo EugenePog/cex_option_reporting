@@ -198,9 +198,12 @@ def test_code_info_matches_the_codes_the_table_allows():
     assert {c: i["letter"] for c, i in CODE_INFO.items()} == CODE_LETTER
     assert {c: i["unit"] for c, i in CODE_INFO.items()} == {           # build 7: all six
         "top_strike": "%", "bottom_strike": "%", "near_top_pct": "%", "near_bottom_pct": "%",
-        "last_expiry": "days", "last_expiry_days": "days"}
-    assert {c: i["default"] for c, i in CODE_INFO.items() if i["default"]} == THRESH  # c, d, f
-    assert {c for c, i in CODE_INFO.items() if i["critical"]} == CRIT        # a, b, e
+        "last_expiry": "days", "last_expiry_days": "days",
+        "no_data_warning": "min", "no_data_error": "min"}                # build 17: g, h
+    box_codes = {c: i for c, i in CODE_INFO.items() if c not in ("no_data_warning",
+                                                                  "no_data_error")}
+    assert {c: i["default"] for c, i in box_codes.items() if i["default"]} == THRESH  # c, d, f
+    assert {c for c, i in box_codes.items() if i["critical"]} == CRIT        # a, b, e
 
 
 # ------------------------------------------------------------- build 7: a / b / e thresholds

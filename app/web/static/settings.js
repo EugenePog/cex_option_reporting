@@ -9,7 +9,8 @@
  * Telegram notifications: edits core.notification_setting through /api/admin/settings/notifications.
  * Each row is edited in place and saved on its own (Save / Delete); "+ Add notification" adds a draft
  * row (Add / Cancel). The server checks every rule (allowed code and asset, one row per asset +
- * notification, threshold 0–100); the editor also greys out the notifications an asset already has.
+ * notification, threshold 0–100; 1–1440 minutes for g / h); the editor also greys out the notifications
+ * an asset already has.
  */
 const API = "/api/admin/settings";
 const T = { rows: [], assets: [], codes: [], th: {min: 0, max: 100}, edits: {}, drafts: [], armed: null, nextDraft: 1 };
@@ -80,9 +81,12 @@ function rowHtml(key, v, draft) {
   const assetOpts = assets.map(a => `<option value="${esc(a)}" ${a === v.asset ? "selected" : ""}>${esc(a)}${T.assets.includes(a) ? "" : " (no positions)"}</option>`).join("");
   const codeOpts = T.codes.map(c => `<option value="${c.code}" ${c.code === v.code ? "selected" : ""} ${used.has(c.code) && c.code !== v.code ? "disabled" : ""}>${esc(optionLabel(c))}${used.has(c.code) && c.code !== v.code ? " (exists)" : ""}</option>`).join("");
   // build 7: every code has a threshold — X / Y % for a–d, N days for e / f; 0 = at the strike / expiry
+  // build 17: g / h — minutes without a fresh price (1 … 1440), their own min / max from the API
   const thTitle = info.unit === "%" ? "Percent away from the strike, towards the inside of the box (0 = at the strike)"
-                                   : "Days before the last expiry (0 = at the expiry; 0.25 = 6 h)";
-  const th = `<input type="number" class="th" data-f="threshold" min="${T.th.min}" max="${T.th.max}" step="any" value="${v.threshold}" title="${thTitle}"><span class="unit">${info.unit === "%" ? "%" : "days"}</span>`;
+                : info.unit === "min" ? "Minutes without a fresh index price before this is sent (1 … 1440)"
+                : "Days before the last expiry (0 = at the expiry; 0.25 = 6 h)";
+  const thMin = info.min ?? T.th.min, thMax = info.max ?? T.th.max;
+  const th = `<input type="number" class="th" data-f="threshold" min="${thMin}" max="${thMax}" step="any" value="${v.threshold}" title="${thTitle}"><span class="unit">${esc(info.unit || "")}</span>`;
   const dirty = draft || isDirty(key);
   const armed = String(T.armed) === String(key);
   const conflict = used.has(v.code);                      // a second row for the same asset + code

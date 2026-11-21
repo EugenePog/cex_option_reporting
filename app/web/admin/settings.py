@@ -26,8 +26,9 @@ The tab has a list of settings on the left; each opens an editor on the right. B
               same list as the Dashboard's Underlying selector); an existing row keeps its asset
               even if that asset has no positions any more;
     * one row per asset + code (a second one would contradict the first) → 409;
-    * threshold — 0 … 100 for every code (build 7): X / Y percent for a–d (top − X %, bottom + Y %),
+    * threshold — 0 … 100 for a–f (build 7): X / Y percent for a–d (top − X %, bottom + Y %),
               N days for e / f (last expiry − N days); 0 = exactly at the strike / expiry;
+              1 … 1440 minutes for g / h (build 17: no fresh price for X min);
     * note — free text (≤ 500 characters).
 
   Every change is written to core.audit_log. Deleting a row keeps core.notification_state (keyed by
@@ -50,7 +51,7 @@ from app.db.models_core import (
     Subaccount,
 )
 from app.db.models_gold import AssetBalanceTimeseries
-from app.domain.alerts import CODE_INFO, THRESHOLD_MAX, THRESHOLD_MIN
+from app.domain.alerts import CODE_INFO, THRESHOLD_MAX, THRESHOLD_MIN, threshold_range
 from app.domain.hedge import HedgeInputError, clean_ccy, clean_note, clean_qty, hedge_grid
 from app.web.accounts import account_options, account_underlyings
 from app.web.deps import CurrentUser, require_admin
@@ -96,9 +97,9 @@ def _validate(s, body: NotificationIn, current: NotificationSetting | None) -> d
         raise HTTPException(422, f"'{asset}' is not an asset of the accounts (no positions in it)")
     unit = CODE_INFO[code]["unit"]
     threshold = float(body.threshold or 0)
-    if not THRESHOLD_MIN <= threshold <= THRESHOLD_MAX:
-        raise HTTPException(422, f"Threshold must be between {THRESHOLD_MIN} and {THRESHOLD_MAX}"
-                                 f" ({unit})")
+    lo, hi = threshold_range(code)
+    if not lo <= threshold <= hi:
+        raise HTTPException(422, f"Threshold must be between {lo:g} and {hi:g} ({unit})")
     note = (body.note or "").strip() or None
     if note and len(note) > NOTE_MAX:
         raise HTTPException(422, f"Note is too long (max {NOTE_MAX} characters)")

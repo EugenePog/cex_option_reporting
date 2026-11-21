@@ -427,6 +427,40 @@ pm2 restart web       # Settings shows "Position hedged" above Telegram notifica
 - Check: `psql "$DATABASE_URL" -c "select * from core.hedged_position order by subaccount_id, ccy;"`;
   changes are in `core.audit_log` (`settings.hedged.*`).
 
+### 10l. Alerts can't be missed silently (build 17, migration 0026)
+
+```bash
+make migrate                          # 0026: codes g / h + core.notification_feed_state
+pm2 restart pipeline worker web
+python -m app.cli worker --dry-run    # optional: what would be sent now
+```
+
+- **Silver ignores a snapshot run that is still being written** (`bronze.ingest_run` status
+  `RUNNING`, started < 10 min ago). Before, a pipeline run that fell between the collector's
+  positions write and its balances write saw every leg as "stale": the box looked closed to the
+  worker for one pipeline cycle — its price alerts were not checked, then re-armed and sent again
+  (e.g. "BTC-USD reached the bottom strike" every ~1–2 h while the price stayed below). The run is
+  picked up by the next pipeline run once it has finished. A run still `RUNNING` after 10 min
+  (crashed collector) counts as finished, and a run that ended in `ERROR` counts as before — so
+  this can never hide legs. Silver reads its sources in one consistent snapshot (REPEATABLE READ).
+  The alert rules themselves are unchanged.
+- **New notifications** in **Settings → Telegram notifications**, per asset, threshold in
+  **minutes** (1–1440):
+  - `g · no_data_warning` (default 10 min) — 🟡 `⚠ alerts can't check BTC-USD: no price for 12 min`
+  - `h · no_data_error` (default 30 min, critical) — 🔴 `CRITICAL · ⚠ alerts can't check …`
+
+  "No price" = the newest price the worker has — the live OKX index, else the newest stored
+  1-minute candle — is older than the threshold (no price at all = at once). The message says what
+  the worker has and whether the box price alerts run on that old price or are not checked at all.
+  Each is sent once per outage (h alone if both are due at once); when a fresh price is back,
+  one `✅ alerts can check BTC-USD again` follows. Checked for every exchange × asset that has
+  alive boxes with alerts on. The migration adds g and h, switched on, for every asset that already
+  has notification settings; `seed/common/notification_setting.csv` has them for BTC-USD.
+- Not covered by g / h: the worker process itself being down (it can't report that) — keep an eye on
+  `pm2 status`, or add an external uptime check.
+- Check: `select * from core.notification_feed_state;` (armed / sent per exchange × asset × code)
+  and `scripts/check_alert.sql` for a box alert.
+
 ---
 
 ## Running everything as services (pm2)

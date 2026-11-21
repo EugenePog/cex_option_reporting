@@ -13,6 +13,18 @@ every account and box of that asset). Every code has a threshold (build 7), so t
 
 With threshold 0, a / b fire at the strike itself and e at the expiry moment.
 
+Build 17 — the worker can't check (per exchange × asset of the alive boxes, not per box):
+
+    g  no_data_warning   no fresh price   price age ≥ X min            X = threshold (default 10)
+    h  no_data_error     no fresh price   price age ≥ X min, critical  X = threshold (default 30)
+
+Price age = now − the time of the newest price the worker has for the asset: the live index ticker
+(≈ 0), else the newest stored 1-minute candle (any age), else unknown (= no price at all, due at
+once). Sent once per outage; when a fresh price is back (age below the threshold) the code re-arms
+and, if a g / h message went out, one "✅ alerts can check ASSET again" message follows. h covers g:
+when both are due, only h is sent. These codes are never suppressed by a box being switched off or
+not alive — only an asset without alive boxes is not checked (nothing to miss there).
+
 The box is the one graph ① draws (gold.box_shape: all legs of one strategy on one underlying): top /
 bottom = its highest / lowest strike, last expiry = its right edge. Only ALIVE boxes are watched —
 at least one leg still open: status open and not past its expiry (an option can't be open after it
@@ -40,11 +52,13 @@ from datetime import UTC, datetime, timedelta
 from app.domain.boxes import Leg
 
 CODE_LETTER = {"top_strike": "a", "bottom_strike": "b", "near_top_pct": "c",
-               "near_bottom_pct": "d", "last_expiry": "e", "last_expiry_days": "f"}
+               "near_bottom_pct": "d", "last_expiry": "e", "last_expiry_days": "f",
+               "no_data_warning": "g", "no_data_error": "h"}
 PRICE_CODES = ("top_strike", "bottom_strike", "near_top_pct", "near_bottom_pct")
 TIME_CODES = ("last_expiry", "last_expiry_days")
 TOP_CODES = ("top_strike", "near_top_pct")          # level = top strike − X %, hit when price ≥
 BOTTOM_CODES = ("bottom_strike", "near_bottom_pct")  # level = bottom strike + Y %, hit when price ≤
+NO_DATA_CODES = ("no_data_warning", "no_data_error")    # g, h — per exchange × asset (build 17)
 SUPPRESSED_BY = {"near_top_pct": "top_strike", "near_bottom_pct": "bottom_strike",
                  "last_expiry_days": "last_expiry"}
 
@@ -65,8 +79,19 @@ CODE_INFO: dict[str, dict] = {
                     "unit": "days", "critical": True, "default": 0},
     "last_expiry_days": {"letter": "f", "label": "time ≥ last expiry − N days",
                          "unit": "days", "critical": False, "default": 1},
+    # build 17: minutes without a fresh price (1 … 1440; 0 would fire at once and never re-arm)
+    "no_data_warning": {"letter": "g", "label": "no fresh price for X min — alerts can't check",
+                        "unit": "min", "critical": False, "default": 10, "min": 1, "max": 1440},
+    "no_data_error": {"letter": "h", "label": "no fresh price for X min — alerts can't check",
+                      "unit": "min", "critical": True, "default": 30, "min": 1, "max": 1440},
 }
 THRESHOLD_MIN, THRESHOLD_MAX = 0, 100
+
+
+def threshold_range(code: str) -> tuple[float, float]:
+    """Allowed threshold of a code: 0 … 100 (% or days), 1 … 1440 for the minute codes g / h."""
+    info = CODE_INFO.get(code, {})
+    return info.get("min", THRESHOLD_MIN), info.get("max", THRESHOLD_MAX)
 
 
 @dataclass(frozen=True)
@@ -346,3 +371,127 @@ def setup_message(now: datetime, n_settings: int) -> str:
             f"{fmt_utc(now)}\n"
             f"Critical alerts start with {CRITICAL_MARK} <b>CRITICAL</b>, the others with "
             f"{NORMAL_MARK}.")
+
+
+# --------------------------------------------------------------------------- #
+# No-data notifications (build 17): the worker can't check an asset
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Feed:
+    """The price the worker has for one exchange × asset of alive boxes."""
+    cex_code: str
+    asset: str
+    last_at: datetime | None        # time of the newest price (live ticker / stored candle end)
+    source: str | None              # 'index' | 'candle' | None (no price at all)
+    usable: bool                    # price alerts run on it (live, or candle ≤ max age)
+    n_boxes: int = 0                # alive boxes of this exchange × asset
+
+    def age(self, now: datetime) -> timedelta | None:
+        return None if self.last_at is None else max(timedelta(0), now - self.last_at)
+
+
+@dataclass(frozen=True)
+class FeedState:
+    armed: bool = True
+    sent: bool = False              # a g / h message went out for the current outage
+    last_sent_at: datetime | None = None
+    last_value: float | None = None  # minutes without a price when sent
+    last_message: str | None = None
+
+
+FeedKey = tuple[str, str, str]      # cex_code, asset, code
+
+
+@dataclass
+class FeedMessage:
+    feed: Feed
+    code: str                       # g / h code, or the code that recovered
+    message: str
+    state_key: FeedKey | None       # state stored once Telegram accepted it (None: recovery)
+    new_state: FeedState | None
+
+
+@dataclass
+class FeedEvaluation:
+    messages: list[FeedMessage] = field(default_factory=list)
+    updates: dict[FeedKey, FeedState] = field(default_factory=dict)   # stored without a message
+
+
+def no_data_due(feed: Feed, setting: Setting, now: datetime) -> bool:
+    """No fresh price for at least `threshold` minutes (no price at all counts as due)."""
+    age = feed.age(now)
+    return age is None or age >= timedelta(minutes=setting.threshold)
+
+
+def evaluate_no_data(feeds: list[Feed], settings: dict[tuple[str, str], Setting],
+                     states: dict[FeedKey, FeedState], now: datetime) -> FeedEvaluation:
+    ev = FeedEvaluation()
+    for feed in feeds:
+        own = {c: settings.get((feed.asset, c)) for c in NO_DATA_CODES}
+        on = {c: st for c, st in own.items() if st is not None and st.enabled}
+        if not on:
+            continue
+        due = {c: no_data_due(feed, st, now) for c, st in on.items()}
+        recovered: list[str] = []
+        for code, st in on.items():
+            key: FeedKey = (feed.cex_code, feed.asset, code)
+            state = states.get(key, FeedState())
+            if not due[code]:                                   # fresh price back → re-arm
+                if not state.armed or state.sent:
+                    if state.sent:
+                        recovered.append(code)
+                    ev.updates[key] = replace(state, armed=True, sent=False)
+                continue
+            if not state.armed:
+                continue
+            if code == "no_data_warning" and due.get("no_data_error") and \
+                    states.get((feed.cex_code, feed.asset, "no_data_error"), FeedState()).armed:
+                ev.updates[key] = replace(state, armed=False)   # h is sent now and covers g
+                continue
+            msg = format_no_data(feed, st, now)
+            age = feed.age(now)
+            ev.messages.append(FeedMessage(feed, code, msg, key, replace(
+                state, armed=False, sent=True, last_sent_at=now,
+                last_value=None if age is None else round(age.total_seconds() / 60, 1),
+                last_message=msg)))
+        if recovered:
+            last = max(recovered, key=lambda c: NO_DATA_CODES.index(c))   # h over g
+            ev.messages.append(FeedMessage(feed, last, format_feed_back(feed, now, states.get(
+                (feed.cex_code, feed.asset, last))), None, None))
+    return ev
+
+
+def format_no_data(feed: Feed, setting: Setting, now: datetime) -> str:
+    """⚠ alerts can't check ASSET: no price for X min — with what the worker has and does."""
+    age = feed.age(now)
+    span = "no price at all" if age is None else f"no price for {fmt_span(age)}"
+    head = f"⚠ alerts can't check {feed.asset}: {span}"
+    head = f"CRITICAL · {head}" if setting.critical else head
+    mark = CRITICAL_MARK if setting.critical else NORMAL_MARK
+    if feed.last_at is not None and feed.source == "index":
+        have = f"Last live {feed.cex_code} index price {fmt_utc(feed.last_at)}"
+    elif feed.last_at is not None:
+        have = (f"Live {feed.cex_code} index price failing · newest stored candle "
+                f"{fmt_utc(feed.last_at)}")
+    else:
+        have = f"Live {feed.cex_code} index price failing · no stored candle"
+    boxes = f"{feed.n_boxes} alive box{'' if feed.n_boxes == 1 else 'es'}"
+    doing = (f"Price alerts of {boxes} run on that old price" if feed.usable
+             else f"Price alerts of {boxes} are NOT checked until a price is back")
+    return "\n".join([
+        f"{mark} <b>{esc(head)}</b>",
+        esc(have),
+        esc(doing),
+        f"Threshold {fmt_num(setting.threshold)} min · {fmt_utc(now)} · #{setting.code}",
+    ])
+
+
+def format_feed_back(feed: Feed, now: datetime, state: FeedState | None) -> str:
+    since = f" (alert sent {fmt_utc(state.last_sent_at)})" if state and state.last_sent_at else ""
+    src = "live index" if feed.source == "index" else "stored candle"
+    at = f", {fmt_utc(feed.last_at)}" if feed.last_at is not None else ""
+    return "\n".join([
+        f"✅ <b>{esc(f'alerts can check {feed.asset} again')}</b>",
+        esc(f"{feed.cex_code} price back ({src}{at}){since}"),
+        f"{fmt_utc(now)} · #no_data_ok",
+    ])

@@ -281,6 +281,10 @@ NOTIFICATION_CODES: tuple[str, ...] = (
     "near_bottom_pct",   # d  price ≤ bottom strike + Y %   Y = threshold, %
     "last_expiry",       # e  time ≥ last expiry − N days   N = threshold, days (0 = at expiry)
     "last_expiry_days",  # f  time ≥ last expiry − N days   N = threshold, days
+    # build 17 (0026): the worker can't check an asset — no fresh index price for X minutes (live
+    # OKX index failing and no stored candle that new). Per exchange × asset, not per box.
+    "no_data_warning",   # g  no price for ≥ X min          X = threshold, minutes
+    "no_data_error",     # h  no price for ≥ X min          X = threshold, minutes (critical)
 )
 
 
@@ -306,7 +310,7 @@ class NotificationSetting(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     asset: Mapped[str] = mapped_column(String(32))              # 'BTC-USD'
     code: Mapped[str] = mapped_column(String(32))               # one of NOTIFICATION_CODES
-    threshold: Mapped[float] = mapped_column(Numeric, default=0)  # X / Y percent, N days; else 0
+    threshold: Mapped[float] = mapped_column(Numeric, default=0)  # X / Y %, N days, X min (g / h)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)   # on / off
     is_critical: Mapped[bool] = mapped_column(Boolean, default=False)  # 🔴 CRITICAL in the chat
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -336,6 +340,27 @@ class NotificationState(Base):
         DateTime(timezone=True), nullable=True)
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_value: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # price when sent
+    last_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class NotificationFeedState(Base):
+    """Alerts worker bookkeeping for the no-data notifications (g / h) — app-written. Added in 0026.
+
+    One row per exchange × asset × code: `armed` until the message is sent; re-armed when a fresh
+    price is back (then one "✅ … again" message if a g / h message went out, `sent`).
+    """
+
+    __tablename__ = "notification_feed_state"
+    __table_args__ = {"schema": CORE}
+
+    cex_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    asset: Mapped[str] = mapped_column(String(32), primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    armed: Mapped[bool] = mapped_column(Boolean, default=True)
+    sent: Mapped[bool] = mapped_column(Boolean, default=False)     # a message went out this outage
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_value: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # minutes without price
     last_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

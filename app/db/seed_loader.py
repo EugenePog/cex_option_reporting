@@ -22,7 +22,6 @@ added otherwise (the database assigns the id) — and parents are named by their
     strategy_rule         sub-account + box + match_json      … + strategy_key
     contract_size         cex_code + inst_type + underlying   –
     notification_setting  asset + code                        –
-    hedged_position       sub-account + ccy                   cex_code, account_label, subacct_name
 
 So rows added in the GUI (boxes in the Box builder, rows in Settings) never clash with the seed:
 they get their own ids, and rows only in the database are left alone. A CSV row whose parent
@@ -56,7 +55,6 @@ from app.db.models_core import (
     CexAccount,
     ContractSize,
     CoreUser,
-    HedgedPosition,
     NotificationSetting,
     Strategy,
     StrategyRule,
@@ -76,7 +74,6 @@ SEED_TABLES: list[tuple[str, type]] = [
     ("strategy_rule", StrategyRule),
     ("contract_size", ContractSize),
     ("notification_setting", NotificationSetting),
-    ("hedged_position", HedgedPosition),            # build 16 (0025): Settings → Position hedged
 ]
 _MODEL_BY_NAME = {name: model for name, model in SEED_TABLES}
 
@@ -90,14 +87,12 @@ NATURAL_KEYS: dict[str, tuple[str, ...]] = {
     "strategy_rule": ("subaccount_id", "strategy_id", "match_json"),
     "contract_size": ("cex_code", "inst_type", "underlying"),
     "notification_setting": ("asset", "code"),
-    "hedged_position": ("subaccount_id", "ccy"),
 }
 PARENTS: dict[str, tuple[str, ...]] = {
     "cex_account": ("user",),
     "subaccount": ("cex_account",),
     "strategy": ("subaccount",),
     "strategy_rule": ("subaccount", "strategy"),
-    "hedged_position": ("subaccount",),
 }
 # Columns of the old (id-based) files: `id` is ignored; parent ids are refused (name the parent).
 OLD_FK_COLUMNS = ("user_id", "cex_account_id", "subaccount_id", "strategy_id")
@@ -265,8 +260,8 @@ def _values(s, table: str, model: type, row: _Row) -> dict[str, Any]:
         values["strategy_id"] = _strategy_id(s, row, values["subaccount_id"])
     if table == "subaccount":
         values.setdefault("subacct_name", "")
-    if table == "hedged_position" and values.get("ccy"):
-        values["ccy"] = values["ccy"].strip().upper()   # as the Settings editor stores it
+    if table == "strategy" and values.get("hedged_ccy"):
+        values["hedged_ccy"] = values["hedged_ccy"].strip().upper()   # build 22, as the Box builder
     if table == "strategy":
         if not (values.get("name") or "").strip():
             raise _RowError("`name` is empty")

@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 
 from app.db.base import SessionLocal
 from app.db.contract_sizes import load_contract_sizes
-from app.db.models_core import HedgedPosition, Strategy, Subaccount
+from app.db.models_core import Strategy, Subaccount
 from app.db.models_silver import IndexCandle as MinuteCandle
 from app.db.models_gold import (
     AssetBalanceTimeseries,
@@ -324,9 +324,13 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
                               .order_by(BoxShape.started_at)).scalars().all() if chosen else []
         else:                                        # a period: same rule over the shown legs
             boxes = build_boxes([dom for _lg, dom in pairs])
-        meta = {sid: (name, color) for sid, name, color in s.execute(
-            select(Strategy.id, Strategy.name, Strategy.color)
-            .where(Strategy.id.in_({b.strategy_id for b in boxes if b.strategy_id})))}
+        meta, hedged_q = {}, {}                       # build 22: + each box's Position hedged
+        for sid, name, color, h_qty, h_ccy in s.execute(
+                select(Strategy.id, Strategy.name, Strategy.color, Strategy.hedged_qty,
+                       Strategy.hedged_ccy)
+                .where(Strategy.id.in_({b.strategy_id for b in boxes if b.strategy_id}))):
+            meta[sid] = (name, color)
+            hedged_q[sid] = (_num(h_qty), h_ccy)
         acct = account_labels(s, {b.subaccount_id for b in boxes})
 
         # visible time range: the period (till inclusive → next midnight) if given; otherwise all
@@ -358,18 +362,18 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
                 .order_by(MinuteCandle.ts.desc()).limit(1)).first()
             last = (m[0] + timedelta(minutes=1), m[1]) if m else None
         coin_ul = (chosen or "").split("-")[0] or None
-        q_rows = s.execute(select(HedgedPosition.qty).where(
-            HedgedPosition.subaccount_id.in_(subs), HedgedPosition.ccy == coin_ul)
-        ).scalars().all() if coin_ul else []
         acct_name = account_labels(s, subs[:1]).get(subs[0]) if subs else None
 
     multi_acct = len({b.subaccount_id for b in boxes}) > 1
     box_key = {(b.subaccount_id, b.strategy_id): i for i, b in enumerate(boxes)}
     # build 18: the future-PnL panel — the open legs of the boxes in the legend (period filter)
     in_legend = [(lg, box_key.get((lg.subaccount_id, lg.strategy_id))) for lg, _d in pairs]
+    # build 22: Q per box in the legend — its Position hedged when it is in the underlying's coin
+    box_qty = {i: hedged_q[b.strategy_id][0] for i, b in enumerate(boxes)
+               if b.strategy_id in hedged_q and hedged_q[b.strategy_id][0] is not None
+               and (hedged_q[b.strategy_id][1] or "").upper() == (coin_ul or "").upper()}
     hedge = _hedge_block(in_legend, now, _f(last[1]) if last else None,
-                         _iso(last[0]) if last else None,
-                         sum(_f(q) for q in q_rows) if q_rows else None, coin_ul, acct_name)
+                         _iso(last[0]) if last else None, box_qty, coin_ul, acct_name)
     box_legs: dict[tuple, list] = defaultdict(list)   # the shown legs of each box → its split
     for _lg, dom in pairs:
         box_legs[(dom.subaccount_id, dom.strategy_id)].append(dom)
@@ -420,15 +424,16 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
     }
 
 
-def _hedge_block(rows, now: datetime, s0: float | None, s0_at: str | None, qty: float | None,
-                 coin: str | None, account: str | None) -> dict:
+def _hedge_block(rows, now: datetime, s0: float | None, s0_at: str | None,
+                 box_qty: dict[int, float], coin: str | None, account: str | None) -> dict:
     """build 18 — the future-PnL panel right of graph ①: Q of the coin hedged by the open option
     legs of the boxes the graph shows — `rows` = (gold leg, box key) for the legs inside the
     reporting period, so a box not in the legend contributes nothing. 20 Nov: the page adds up only
     the boxes switched on in the legend, so the options part comes PER BOX: `boxes[key]` = that
     box's options-only profile (hedge_profile with Q = 0); the page adds Q·(S − S0) and the visible
-    boxes. Q comes from core.hedged_position (Settings → Position hedged); not set → 0, `qty_set`
-    false.
+    boxes. build 22: Q is per box too — `boxes[key].qty` = the box's Position hedged
+    (core.strategy.hedged_qty, when its asset is this underlying's coin; set in the Box builder's
+    box dialog); the page adds up the Q of the visible boxes (none set → 0, "Q not set").
 
     build 21 — the two switches above the panel, per box (USD at operation-time prices, gold
     `open_cash_usd` / `realized_cash_usd`, app.domain.leg_cash):
@@ -475,10 +480,13 @@ def _hedge_block(rows, now: datetime, s0: float | None, s0_at: str | None, qty: 
                       "strike": _f(lg.strike), "opt_type": ot, "side": side,
                       "size_coin": abs(size), "expires_at": _iso(lg.expires_at),
                       "open_cash_usd": _num(lg.open_cash_usd), "cash_source": lg.cash_source})
-    out = {"coin": coin, "account": account, "qty": qty, "qty_set": qty is not None,
+    for key, q in box_qty.items():                   # build 22: Q of the box (may have no legs open)
+        cash[key]["qty"] = q
+    out = {"coin": coin, "account": account,
            "ref_px": s0, "ref_at": s0_at, "legs": lines, "n_skipped": skipped, "boxes": {}}
     if s0 is not None:
-        out["boxes"] = {key: {**hedge_profile(by_box.get(key, []), 0.0, s0), **cash[key]}
+        out["boxes"] = {key: {"qty": None, **hedge_profile(by_box.get(key, []), 0.0, s0),
+                              **cash[key]}
                         for key in sorted(set(by_box) | set(cash))}
     return out
 

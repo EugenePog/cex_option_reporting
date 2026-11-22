@@ -406,6 +406,9 @@ pm2 restart pipeline   # nothing else — same tables, same results
 
 ### 10k. Settings → Position hedged (build 16, migration 0025)
 
+> **Build 22: replaced** — Q is set per box in the Box builder now and this table / Settings item
+> are gone (§10q). Kept for the history of older databases.
+
 ```bash
 make migrate          # 0025: core.hedged_position (empty)
 pm2 restart web       # Settings shows "Position hedged" above Telegram notifications
@@ -468,8 +471,8 @@ pm2 restart web
 - **Account selector** (Dashboard, Analyze): no *All* any more — accounts sorted by name, the first
   is the default. The Underlying / ②b asset (Dashboard) and Symbol / Strategy (Analyze) lists show
   what that account has.
-- **Graph ①, right of the chart:** *PnL at expiry* if BTC ends at that price — the account's Q
-  (Settings → Position hedged, §10k) with the open options of the boxes **in the legend and
+- **Graph ①, right of the chart:** *PnL at expiry* if BTC ends at that price — the Q
+  (Position hedged of the boxes, Box builder — §10q; was Settings, §10k) with the open options of the boxes **in the legend and
   switched on** (a grey box drops out; the panel updates on every legend click), from the current
   price, no premiums. Green / red = profit / loss with options; the band out to "BTC only" is dark green where
   the options save, brown where they cost. White lines = open strikes. Hover = values in USD and
@@ -558,7 +561,32 @@ fills `fillIdxPx`. Bronze is not touched; the pipeline reads them into new silve
 on = open options counted from their entry with the premium received / paid and fees (so the V
 need not meet at today's price); Realized on = + realized PnL of options closed in the period. All
 in USD at the index price of each trade. The hover splits *Options* into *at expiry*, *premiums &
-fees (open)* and *realized in period*. Q (Settings → Position hedged) must not include option cash.
+fees (open)* and *realized in period*. Q (Position hedged of a box, §10q) must not include option cash.
+
+### 10q. Position hedged per box (build 22, migration 0028)
+
+```bash
+make migrate          # 0028: + core.strategy.hedged_qty / hedged_ccy; DROPS core.hedged_position
+pm2 restart web       # Box builder dialog + card, graph ① panel, Settings without Position hedged
+```
+
+- **Write down the old values first** — the account Q can't be split into boxes automatically, so
+  0028 drops it. The migration prints every row it drops (`0028: core.hedged_position is dropped …
+  account 4 (OKX_K · Straddle sell): 10 BTC`); or, before migrating:
+  `psql "$DATABASE_URL" -c "select * from core.hedged_position order by subaccount_id, ccy;"`.
+- **Where:** Box builder → **+ New box** or a box's **✎** → *Position hedged*: amount (≥ 0, empty =
+  not set) + asset — what the account holds now: every asset with a non-zero amount in its latest
+  balance snapshot (`gold.asset_balance_timeseries`, the same rule Settings used), shown with the
+  balance (`BTC · 12.53`). A box keeps its saved asset when that balance is gone (*no balance now*);
+  any other asset is refused. No balances at all → the field is disabled. Save. The box card shows
+  **HEDGED 2.5 BTC** after OPEN when set and not 0. Every change is in `core.audit_log`
+  (`box_builder.create_strategy` / `update_strategy`, `hedged=old->new`).
+- **Graph ①:** Q = sum of the Position hedged of the boxes **in the legend and switched on**, in the
+  underlying's coin; switching a box off removes its Q and its options. The panel header shows
+  "Q 2.5 BTC", or "Q not set" when none of the shown boxes has one.
+- **Seeding (optional):** `strategy.csv` columns `hedged_qty`, `hedged_ccy` (leave them out to keep
+  what the dialog set). `seed/<env>/hedged_position.csv` files are no longer loaded — delete them.
+- Check: `psql "$DATABASE_URL" -c "select subaccount_id, name, hedged_qty, hedged_ccy from core.strategy where hedged_qty is not null;"`.
 
 ---
 

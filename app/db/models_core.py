@@ -1,7 +1,7 @@
 """Core-layer ORM models (schema: core) — settings / dimension tables.
 
 These are the manually-managed tables (users, accounts, subaccounts, strategies, rules, contract
-sizes per exchange, Telegram notification settings, hedged positions per account and asset) plus
+sizes per exchange, Telegram notification settings) plus
 a few system tables (audit_log, pipeline_watermark, notification_state — written by the alerts
 worker) and the app-written manual strategy links (strategy_link, written by the admin Box
 builder — NOT seeded).
@@ -111,6 +111,7 @@ class Strategy(Base):
     __table_args__ = (
         # target of strategy_link's composite FK (strategy must belong to the leg's subaccount)
         UniqueConstraint("id", "subaccount_id", name="uq_strategy_id_subaccount"),
+        CheckConstraint("hedged_qty >= 0", name="ck_strategy_hedged_qty"),   # build 22 (0028)
         # build 11 (0024): one active box per key in a sub-account (deleted boxes keep theirs)
         Index("uq_strategy_key_active", "subaccount_id", "key", unique=True,
               postgresql_where=text("deleted_at IS NULL")),
@@ -136,6 +137,12 @@ class Strategy(Base):
     # written (existing rows are kept and used again when it is switched back on).
     send_notifications: Mapped[bool] = mapped_column(Boolean, default=True,
                                                      server_default=text("true"))
+    # build 22 (0028): the hedged amount Q of this box — the coin held besides the options and
+    # hedged by them (graph ① future-PnL panel: the Q of the boxes shown is added up). Set in the
+    # Box builder's New box / ✎ dialog, "Position hedged"; NULL = not set. Must not include option
+    # cash (premiums, fees, realized PnL — the panel adds those itself).
+    hedged_qty: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    hedged_ccy: Mapped[str | None] = mapped_column(String(16), nullable=True)   # e.g. 'BTC'
 
 
 class StrategyRule(Base):
@@ -241,32 +248,6 @@ class ContractSize(Base):
     underlying: Mapped[str] = mapped_column(String(32))         # 'BTC-USD' (OKX instFamily)
     ct_val: Mapped[float] = mapped_column(Numeric)              # coin units per contract
     ct_val_ccy: Mapped[str] = mapped_column(String(16))         # 'BTC'
-    note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class HedgedPosition(Base):
-    """Hedged amount (Q) per account and asset — edited in the admin Settings tab, "Position hedged"
-    (/api/admin/settings/hedged-positions, build 16); seedable. Added in 0025.
-
-    Q units of the asset (`ccy`, as in gold.asset_balance_timeseries, e.g. 'BTC') that the
-    account's options hedge. Read by the future-PnL profile of graph ① — the PnL at expiry of Q
-    hedged by the options vs. the same Q without them. Set by hand on purpose: the balance OKX
-    reports (`eq`) is equity and includes the options' own PnL, so it is not the amount held.
-    No row = not set.
-    """
-
-    __tablename__ = "hedged_position"
-    __table_args__ = (
-        UniqueConstraint("subaccount_id", "ccy", name="uq_hedged_position"),
-        CheckConstraint("qty >= 0", name="ck_hedged_position_qty"),
-        {"schema": CORE},
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    subaccount_id: Mapped[int] = mapped_column(Integer, ForeignKey("core.subaccount.id"))
-    ccy: Mapped[str] = mapped_column(String(16))                # 'BTC'
-    qty: Mapped[float] = mapped_column(Numeric)                 # hedged amount, in `ccy`
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

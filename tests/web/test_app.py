@@ -73,11 +73,3 @@ def test_settings_api_requires_auth():
     assert client.post(base, json=body).status_code == 401
     assert client.put(base + "/1", json=body).status_code == 401
     assert client.delete(base + "/1").status_code == 401
-
-
-def test_hedged_positions_api_requires_auth():
-    # build 16: Settings → Position hedged
-    base = "/api/admin/settings/hedged-positions"
-    assert client.get(base).status_code == 401
-    assert client.put(base + "/1/BTC", json={"qty": 1}).status_code == 401
-    assert client.delete(base + "/1/BTC").status_code == 401

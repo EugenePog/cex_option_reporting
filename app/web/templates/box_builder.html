@@ -132,6 +132,13 @@
           <span>Send notifications<small>Telegram alerts for this box</small></span></label>
       </div>
       <label>Description<input id="ns-desc" placeholder="optional"></label>
+      <!-- build 22: Position hedged — Q of this box (core.strategy.hedged_qty / hedged_ccy) -->
+      <label>Position hedged
+        <span class="bb-hedge"><input id="ns-hq" type="number" min="0" step="any" placeholder="not set"
+          aria-label="Hedged amount"><select id="ns-hccy" aria-label="Asset"></select></span>
+        <small class="bb-hint">The coin held besides the options and hedged by this box (Q) — the PnL panel of
+          Dashboard graph ① adds up the Q of the boxes it shows. Don't include premiums, fees or realized PnL:
+          the panel adds those itself. Empty = not set. Assets: what the account holds now, with its balance.</small></label>
     </div>
     <div class="bb-danger" id="ns-del-confirm" hidden></div>
     <div class="err" id="ns-err" hidden></div>

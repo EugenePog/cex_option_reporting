@@ -19,9 +19,9 @@
       closed early: a dot at the close, then dashed to expiry; the shaded side is where the leg pays off — above a
       call, below a put; green = bought, red = sold, size of position shown on the line in coin (BTC). The box
       covers all its legs. Times in UTC.<br>
-      Right of the chart: <b>PnL at expiry</b> if the price ends at that level — the account's hedged amount Q
-      (Settings → Position hedged) with the open options of the boxes in the legend (switch a box off there and its
-      options drop out), from the current price. <b>Premiums &amp; fees (open)</b>: open options counted from their
+      Right of the chart: <b>PnL at expiry</b> if the price ends at that level — the hedged amount Q
+      (Position hedged of each box, Box builder) with the open options of the boxes in the legend (switch a box off there and its
+      Q and options drop out), from the current price. <b>Premiums &amp; fees (open)</b>: open options counted from their
       entry, with the premium received / paid and fees; <b>Realized (closed)</b>: + realized PnL of options closed
       in the period — both in USD at the index price of each trade.</p>
     <div class="rpbar">
@@ -710,7 +710,8 @@ async function pbLoad(p){
 
 // --- ① future-PnL panel (build 18) -------------------------------------------------------------
 // Right of the time axis, on the same price scale: the PnL at expiry if the price ends at that level
-// — Q (Settings → Position hedged) of the coin hedged by the open option legs of the boxes the
+// — Q (build 22: Σ Position hedged of those boxes, core.strategy.hedged_qty in the underlying's
+// coin, set in the Box builder's box dialog) of the coin hedged by the open option legs of the boxes the
 // graph shows: in the legend (the reporting period decides that) AND switched on there — a grey
 // box drops out, and the panel is rebuilt on every legend click (20 Nov). Counted from the current
 // price S0, intrinsic values only (no premiums). Width = |PnL| in USD, colour = sign: green profit / red loss "with options";
@@ -765,13 +766,16 @@ function pnlParts(keys){
   const p = {sw, openCash: sum(b => b.open_cash), entry: sum(b => b.entry_shift), realized: sum(b => b.realized),
              closed: sum(b => b.n_closed), noCash: sum(b => b.n_no_cash)};
   p.shift = (sw.prem ? p.entry : 0) + (sw.real ? p.realized : 0);
+  // build 22: Q = the Position hedged of the visible boxes (a box switched off takes its Q along)
+  p.qSet = bx.some(b => b.qty != null); p.q = sum(b => b.qty);
   return p;
 }
 // one profile = Q·(S − S0) + the visible boxes' options-only profiles + the switches' constant
 // (combine_profiles in Python)
 function pnlCombine(keys){
-  const h = PNL.h, q = h.qty || 0, s0 = h.ref_px, prs = keys.map(k => h.boxes[k]);
+  const h = PNL.h, s0 = h.ref_px, prs = keys.map(k => h.boxes[k]);
   PNL.parts = pnlParts(keys);
+  const q = PNL.parts.q;
   const shift = PNL.parts.shift;
   const pxs = [...new Set([s0, ...prs.flatMap(pr => pr.points.map(p => p.px))])].sort((a, b) => a - b);
   const sum = (f) => prs.reduce((t, pr) => t + f(pr), 0);
@@ -781,18 +785,18 @@ function pnlCombine(keys){
 }
 // x / y of the six panel traces: profit, loss, options save, options cost, outline, coin-only line
 function pnlData(){
-  const h = PNL.h, grid = pnlGrid(), P = grid.map(S => pnlAt(S));
+  const grid = pnlGrid(), P = grid.map(S => pnlAt(S)), qSet = PNL.parts.qSet;
   const F = [0, 1, 2, 3].map(() => ({x: [], y: []}));
   for (let i = 1; i < grid.length; i++) {
     const a = grid[i - 1], b = grid[i], m = pnlAt((a + b) / 2), pa = P[i - 1], pb = P[i];
     const f = F[m.hedged >= 0 ? 0 : 1];
     f.x.push(0, Math.abs(pa.hedged), Math.abs(pb.hedged), 0, 0, null); f.y.push(a, a, b, b, a, null);
-    const dlt = m.hedged - m.btc_only, g = !h.qty_set ? null : dlt > 0 ? F[2] : dlt < 0 ? F[3] : null;
+    const dlt = m.hedged - m.btc_only, g = !qSet ? null : dlt > 0 ? F[2] : dlt < 0 ? F[3] : null;
     if (g) { g.x.push(Math.abs(pa.hedged), Math.abs(pa.btc_only), Math.abs(pb.btc_only), Math.abs(pb.hedged), Math.abs(pa.hedged), null);
              g.y.push(a, a, b, b, a, null); }
   }
   F.push({x: P.map(v => Math.abs(v.hedged)), y: grid});
-  F.push(h.qty_set ? {x: P.map(v => Math.abs(v.btc_only)), y: grid} : {x: [], y: []});
+  F.push(qSet ? {x: P.map(v => Math.abs(v.btc_only)), y: grid} : {x: [], y: []});
   return F;
 }
 const PNL_STYLE = [{fill: "toself", fillcolor: PNL_POS, line: {width: 0}}, {fill: "toself", fillcolor: PNL_NEG, line: {width: 0}},
@@ -802,7 +806,7 @@ function pnlHead(){
   const h = PNL.h, c = escH(h.coin || ""), legs = h.legs.filter(l => PNL.keys.includes(String(l.box))).length;
   if (!PNL.prof) return "PnL at expiry<br>no current price";
   const sw = (PNL.parts || {}).sw || {}, closed = (PNL.parts || {}).closed || 0;
-  return `PnL at expiry<br>${h.qty_set ? `Q ${pbNum(h.qty)} ${c}` : "Q not set"} · ${plural(legs, "leg", "legs")}` +
+  return `PnL at expiry<br>${PNL.parts.qSet ? `Q ${pbNum(PNL.parts.q)} ${c}` : "Q not set"} · ${plural(legs, "leg", "legs")}` +
     (sw.prem || sw.real ? `<br>${[sw.prem ? "+ premiums" : "", sw.real ? `+ realized (${closed})` : ""].filter(Boolean).join(" · ")}` : "");
 }
 // white lines: the open strikes of the visible boxes (one per strike) + S0 dashed, now → the panel
@@ -852,7 +856,7 @@ function pnlRefresh(gd){
 function pnlRange(y0, y1){
   if (!PNL.prof) return [0, 1];
   let m = 0;
-  const take = S => { const v = pnlAt(S); m = Math.max(m, Math.abs(v.hedged), PNL.h.qty_set ? Math.abs(v.btc_only) : 0); };
+  const take = S => { const v = pnlAt(S); m = Math.max(m, Math.abs(v.hedged), PNL.parts.qSet ? Math.abs(v.btc_only) : 0); };
   take(Math.max(y0, 0)); take(Math.max(y1, 0));
   for (const p of PNL.prof.points) if (p.px > y0 && p.px < y1) take(p.px);
   return [0, (m || 1) * 1.08];
@@ -872,7 +876,7 @@ function pnlText(S){
   const mv = (S / s0 - 1) * 100, row = (name, x, cls) =>
     `<tr${cls ? ` class="${cls}"` : ""}><td>${name}</td><td>${pnlUsd(x)}</td><td>${pnlCoin(x, S)} ${c}</td></tr>`;
   let note = "";
-  if (!h.qty_set) note = "Q not set (Settings → Position hedged): options only";
+  if (!pp.qSet) note = "Q not set (Box builder → box → Position hedged): options only";
   else if (Math.abs(v.btc_only) > 0.5 && Math.abs(o) > 0.5) {
     const share = Math.round(Math.abs(o) / Math.abs(v.btc_only) * 100), fall = v.btc_only < 0;
     note = fall ? (o > 0 ? `options cover ${share}% of the fall` : `options add ${share}% to the fall`)
@@ -880,7 +884,7 @@ function pnlText(S){
   }
   return `<div class="pnl-h"><b>${c} at ${Math.round(S).toLocaleString()}</b> <span>${mv >= 0 ? "+" : "−"}${Math.abs(mv).toFixed(1)}% from ${fmtPx(s0)}</span></div>` +
     `<table>${row("With options", v.hedged, v.hedged >= 0 ? "pos" : "neg")}` +
-    (h.qty_set ? row(`${c} only (Q ${pbNum(h.qty)})`, v.btc_only) : "") +
+    (pp.qSet ? row(`${c} only (Q ${pbNum(pp.q)})`, v.btc_only) : "") +
     row("Options", o, o > 0 ? "help" : o < 0 ? "cost" : "") +
     // build 21: what the options are made of when a switch is on
     (pp.sw.prem || pp.sw.real ? row("&nbsp;· at expiry", o - (pp.sw.prem ? pp.openCash : 0) - (pp.sw.real ? pp.realized : 0), "sub") : "") +

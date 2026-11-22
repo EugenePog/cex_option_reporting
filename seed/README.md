@@ -16,7 +16,7 @@ seed/
   dev/        rows of the dev environment    — user, cex_account, subaccount, strategy, strategy_rule
   test/       rows of the test environment   — (same tables)
   prod/       rows of production             — empty for now (see prod/README.md)
-  examples/   templates for all eight tables (not loaded)
+  examples/   templates for all seven tables (not loaded)
 ```
 
 `make seed` loads `common/` and then the environment's folder. The environment is `APP_ENV` in
@@ -59,14 +59,12 @@ the error names the file and line.
 | `strategy_rule.csv` | sub-account + box + `match_json` | `cex_code`, `account_label`, `subacct_name`, `strategy_key` |
 | `contract_size.csv` | `cex_code` + `inst_type` + `underlying` | – |
 | `notification_setting.csv` | `asset` + `code` | – |
-| `hedged_position.csv` (build 16) | sub-account + `ccy` | `cex_code`, `account_label`, `subacct_name` |
 
 - **Load order / dependencies:** `user` → `cex_account` → `subaccount` → `strategy` → `strategy_rule`;
-  `contract_size` and `notification_setting` have no dependencies; `hedged_position` (build 16)
-  needs its sub-account. A parent must be in the database
+  `contract_size` and `notification_setting` have no dependencies. A parent must be in the database
   already or earlier in the same load (its own CSV).
 - **Only the columns a file has are written** — e.g. leave `send_notifications` out of
-  `strategy.csv` to keep what the Box builder's ✎ dialog set.
+  `strategy.csv` to keep what the Box builder's ✎ dialog set (the same for `hedged_qty` / `hedged_ccy`).
 - `match_json` is JSON inside a CSV cell — wrap the whole cell in double quotes and double any inner
   quotes, e.g. `"{""inst_pattern"": ""BTC-USD-*""}"`.
 
@@ -96,9 +94,8 @@ the error names the file and line.
   `--wipe-links` if you really want to drop them.
 - **Settings tab rows** (`notification_setting`): a change made in the admin **Settings → Telegram
   notifications** editor is overwritten by the next `make seed` if the CSV still has the old values
-  for that asset + code — change it there too. The same holds for **Settings → Position hedged**
-  (`hedged_position`, build 16) and its account + asset. `--replace` empties `hedged_position`
-  (it references `core.subaccount`): only the rows in the CSV come back.
+  for that asset + code — change it there too. (Build 22: the build 16 *Settings → Position hedged*
+  table `hedged_position` is gone — Q is set per box, `strategy.csv` `hedged_qty` / `hedged_ccy`.)
 - `cex_account` credential columns are not in the CSVs — the collector reads `<LABEL>_*` from
   `.env`. Do **not** put API keys in these files (they're in git).
 - `seed/*.csv` directly in `seed/` (the old place) are no longer loaded; the loader warns about them.
@@ -142,6 +139,8 @@ the error names the file and line.
 | `description` | free text |
 | `color` | hex color for the UI, e.g. `#4c9aff` |
 | `send_notifications` | optional (migration 0023): `true` / `false` — Telegram alerts for this box. Leave the column out to keep what the Box builder's ✎ dialog set; if the column is there, `make seed` writes it back. New boxes default to `true`. |
+| `hedged_qty` | optional (build 22, migration 0028): **Position hedged** — the coin held besides the options and hedged by this box (Q for Dashboard graph ①'s PnL panel), a number ≥ 0; empty = not set. Must not include option premiums, fees or realized PnL (the panel adds those). Leave the column out to keep what the Box builder's ✎ dialog set. |
+| `hedged_ccy` | optional (build 22): the asset of `hedged_qty`, e.g. `BTC`; stored upper-case. Counts in graph ① when it is the coin of the shown underlying (`BTC-USD` → `BTC`). |
 
 **`strategy_rule`**
 
@@ -187,16 +186,6 @@ The migration already inserts the six BTC-USD rows (all on; a, b, e critical; X 
 seeding this file is only needed to change them or add assets (e.g. six more rows for `ETH-USD`).
 Build 17: migration 0026 adds g (10 min) and h (30 min, critical) for every asset that already has
 settings, so `seed/common/notification_setting.csv` now has eight BTC-USD rows.
-
-**`hedged_position`** — hedged amount Q per account × asset, for the future-PnL profile of graph ①
-(build 16, migration 0025; edited in **Settings → Position hedged**)
-
-| column | allowed values |
-|---|---|
-| `cex_code`, `account_label`, `subacct_name` | the sub-account (as in `subaccount.csv`; empty `subacct_name` = the main account) — with `ccy` the **key** |
-| `ccy` | the asset as in the balances (`gold.asset_balance_timeseries.ccy`), e.g. `BTC`; stored upper-case |
-| `qty` | hedged amount in `ccy`, a number ≥ 0 (no row = not set) |
-| `note` | free text |
 
 ### `strategy_rule.match_json` vocabulary
 

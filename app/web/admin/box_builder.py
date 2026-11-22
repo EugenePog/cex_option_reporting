@@ -44,7 +44,8 @@ from app.db.models_core import (
 )
 from app.db.models_gold import PositionLeg as GoldLeg
 from app.db.models_silver import ClosedPosition, PositionLeg, PositionSnapshot, TradeFill
-from app.web.accounts import account_options
+from app.domain.hedge import HedgeInputError, clean_ccy, clean_qty
+from app.web.accounts import account_assets, account_options
 from app.web.deps import CurrentUser, require_admin
 
 logger = logging.getLogger(__name__)
@@ -254,6 +255,9 @@ def _strategy_rows(s, sub_id: int, legs: list[dict]) -> list[dict]:
         out.append({"id": st.id, "name": st.name, "key": st.key, "color": st.color or "#888888",
                     "description": st.description, "is_unassigned": st.name == "unassigned",
                     "send_notifications": bool(st.send_notifications),
+                    # build 22: Position hedged (Q of this box, graph ① PnL panel)
+                    "hedged_qty": float(st.hedged_qty) if st.hedged_qty is not None else None,
+                    "hedged_ccy": st.hedged_ccy,
                     "rules": rules.get(st.id, []), **stats.get(st.id, empty)})
     # unassigned last, others by id
     out.sort(key=lambda r: (r["is_unassigned"], r["id"]))
@@ -311,6 +315,7 @@ def board(subaccount: int, underlying: str | None = None, opened_from: str | Non
     with SessionLocal() as s:
         legs = _load_legs(s, subaccount)
         strategies = _strategy_rows(s, subaccount, legs)
+        assets = account_assets(s, subaccount)          # build 22: Position hedged asset list
         as_of = s.execute(select(func.max(PositionLeg.updated_at))
                           .where(PositionLeg.subaccount_id == subaccount)).scalar_one_or_none()
     # Leg filters (underlying, dates, status, source, find) narrow the Legs list only. The boxes
@@ -319,7 +324,7 @@ def board(subaccount: int, underlying: str | None = None, opened_from: str | Non
     legs.sort(key=lambda lg: lg["pos_opened_at"] or "", reverse=True)
     shown = _filter_legs(legs, underlying, opened_from, opened_to, status, source, q)
     return {"subaccount": subaccount, "as_of": _iso(as_of), "strategies": strategies,
-            "legs": legs, "shown_leg_ids": [lg["id"] for lg in shown],
+            "legs": legs, "shown_leg_ids": [lg["id"] for lg in shown], "assets": assets,
             "counts": {"shown": len(shown), "all_legs": len(legs),
                        "pending": sum(1 for lg in legs if lg["pending"])},
             "recompute": _rc_status()}
@@ -461,6 +466,8 @@ class StrategyIn(BaseModel):
     color: str | None = None
     description: str | None = None
     send_notifications: bool = True        # Telegram alerts for this box (0023)
+    hedged_qty: Any = None                 # build 22: Position hedged — empty / None = not set
+    hedged_ccy: str | None = None          # the asset, e.g. BTC (needed when hedged_qty is set)
 
 
 class StrategyEditIn(BaseModel):
@@ -468,6 +475,34 @@ class StrategyEditIn(BaseModel):
     color: str | None = None
     description: str | None = None
     send_notifications: bool | None = None  # None = unchanged
+    hedged_qty: Any = None                  # build 22: sent → set (empty = clear); not sent → kept
+    hedged_ccy: str | None = None
+
+
+def _hedged(qty_raw: Any, ccy_raw: str | None) -> tuple[float | None, str | None]:
+    """build 22 — Position hedged of a box: (qty, ccy), (None, None) when not set; 422 otherwise.
+    qty is a number ≥ 0 in the asset; 0 is kept as a value (= nothing hedged)."""
+    if qty_raw is None or (isinstance(qty_raw, str) and not qty_raw.strip()):
+        return None, None
+    try:
+        return clean_qty(qty_raw), clean_ccy(ccy_raw)
+    except HedgeInputError as e:
+        raise HTTPException(422, f"Position hedged: {e}") from None
+
+
+def _check_hedged_asset(s, sub_id: int, ccy: str | None, keep: str | None = None) -> None:
+    """build 22 — the asset must be one the account holds now (non-zero balance in its latest
+    snapshot, as in the build 16 Settings editor); the box's current asset may stay even when its
+    balance went to 0 since."""
+    if ccy is None or ccy == keep:
+        return
+    if ccy not in {a["ccy"] for a in account_assets(s, sub_id)}:
+        raise HTTPException(422, f"Position hedged: the account has no {ccy} balance — pick one of "
+                                 "its assets")
+
+
+def _hedged_txt(qty: float | None, ccy: str | None) -> str:
+    return f"{qty:g} {ccy}" if qty is not None else "not set"
 
 
 def _valid_name(raw: str | None) -> str:
@@ -694,27 +729,35 @@ def create_strategy(body: StrategyIn, user: CurrentUser = Depends(require_admin)
     _check_sub(user, body.subaccount_id)
     name = _valid_name(body.name)
     color = body.color if body.color and _HEX.match(body.color) else "#9b7be0"
+    h_qty, h_ccy = _hedged(body.hedged_qty, body.hedged_ccy)
     with SessionLocal() as s, s.begin():
         if _name_taken(s, body.subaccount_id, name):
             raise HTTPException(409, f"Box '{name}' already exists in this account")
+        _check_hedged_asset(s, body.subaccount_id, h_ccy)
         st = Strategy(subaccount_id=body.subaccount_id, name=name, color=color,
                       key=_free_key(s, body.subaccount_id, name),
                       description=(body.description or "").strip() or None,
-                      send_notifications=body.send_notifications)
+                      send_notifications=body.send_notifications,
+                      hedged_qty=h_qty, hedged_ccy=h_ccy)
         s.add(st)
         s.flush()
         _audit(s, user.id, "box_builder.create_strategy",
                f"strategy={st.id} subaccount={body.subaccount_id} name={name} key={st.key} "
-               f"notify={'on' if st.send_notifications else 'off'}")
+               f"notify={'on' if st.send_notifications else 'off'} "
+               f"hedged={_hedged_txt(h_qty, h_ccy)}"[:255])
         return {"id": st.id, "name": st.name, "key": st.key, "color": st.color,
-                "send_notifications": st.send_notifications}
+                "send_notifications": st.send_notifications,
+                "hedged_qty": h_qty, "hedged_ccy": h_ccy}
 
 
 @router.put("/strategies/{strategy_id}")
 def update_strategy(strategy_id: int, body: StrategyEditIn,
                     user: CurrentUser = Depends(require_admin)) -> dict:
-    """Edit a box: name, color, description, send notifications. Legs, pins and rules are
-    untouched; reports and the alerts worker read core.strategy live, so no recompute is needed."""
+    """Edit a box: name, color, description, send notifications, Position hedged (build 22). Legs,
+    pins and rules are untouched; reports and the alerts worker read core.strategy live, so no
+    recompute is needed."""
+    hedged_sent = "hedged_qty" in body.model_fields_set
+    h_qty, h_ccy = _hedged(body.hedged_qty, body.hedged_ccy) if hedged_sent else (None, None)
     with SessionLocal() as s, s.begin():
         st = _active_box(s, user, strategy_id)
         if st.name == UNASSIGNED:
@@ -731,10 +774,19 @@ def update_strategy(strategy_id: int, body: StrategyEditIn,
         if body.send_notifications is not None and body.send_notifications != st.send_notifications:
             st.send_notifications = body.send_notifications
             notify = f" notify={'on' if st.send_notifications else 'off'}"
+        hedged = ""
+        old_q = float(st.hedged_qty) if st.hedged_qty is not None else None
+        if hedged_sent and (old_q, st.hedged_ccy) != (h_qty, h_ccy):
+            _check_hedged_asset(s, st.subaccount_id, h_ccy, keep=st.hedged_ccy)
+            hedged = f" hedged={_hedged_txt(old_q, st.hedged_ccy)}->{_hedged_txt(h_qty, h_ccy)}"
+            st.hedged_qty, st.hedged_ccy = h_qty, h_ccy
         _audit(s, user.id, "box_builder.update_strategy",
-               f"strategy={st.id} subaccount={st.subaccount_id} name={old}->{name}{notify}")
+               f"strategy={st.id} subaccount={st.subaccount_id} name={old}->{name}{notify}"
+               f"{hedged}"[:255])
         return {"id": st.id, "name": st.name, "color": st.color, "description": st.description,
-                "send_notifications": st.send_notifications}
+                "send_notifications": st.send_notifications,
+                "hedged_qty": float(st.hedged_qty) if st.hedged_qty is not None else None,
+                "hedged_ccy": st.hedged_ccy}
 
 
 @router.delete("/strategies/{strategy_id}")

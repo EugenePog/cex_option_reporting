@@ -243,6 +243,22 @@ function payoffPath(legs, w = 200, h = 34) {
   const mn = Math.min(...pts), mx = Math.max(...pts), rng = (mx - mn) || 1;
   return pts.map((v, i) => `${i ? "L" : "M"}${(4 + (w - 8) * i / 40).toFixed(1)} ${(h - 4 - (h - 8) * (v - mn) / rng).toFixed(1)}`).join(" ");
 }
+// build 22: Position hedged on the box card — only when set and not zero
+function hedgedKpi(st) {
+  if (st.is_unassigned || st.hedged_qty == null || !Number(st.hedged_qty)) return "";
+  const q = Number(st.hedged_qty).toLocaleString("en-US", {maximumFractionDigits: 8});
+  return `<div title="Position hedged (Q): coin held besides the options, hedged by this box — Dashboard ① PnL panel">HEDGED<b class="hq">${q} ${esc(st.hedged_ccy || "")}</b></div>`;
+}
+// assets offered in the dialog (build 22): what the account holds now — non-zero balance in its
+// latest snapshot (board `assets`, the build 16 Settings rule), with the balance; plus the box's
+// saved asset when its balance is gone (kept, marked)
+const balTxt = v => Number(v).toLocaleString("en-US", {maximumFractionDigits: 8});
+function hedgeCoins(st) {
+  const out = ((S.data && S.data.assets) || []).map(a => ({ccy: a.ccy, label: `${a.ccy} · ${balTxt(a.balance)}`}));
+  if (st && st.hedged_ccy && !out.some(a => a.ccy === st.hedged_ccy))
+    out.unshift({ccy: st.hedged_ccy, label: `${st.hedged_ccy} · no balance now`});
+  return out;
+}
 function stratKpis(st) {
   // server totals (all legs of the account) adjusted for staged moves
   let n = st.n_legs, pnl = st.net_pnl_usd, open = st.n_open;
@@ -276,7 +292,7 @@ function renderCols() {
       <h3><i class="dot" style="background:${esc(st.color)}"></i><span class="bn" title="${esc(st.description || st.name)}">${esc(st.name)}</span>${!st.is_unassigned && st.send_notifications === false ? `<span class="bb-bell-off" title="Telegram notifications are off for this box (✎ to switch them on)" aria-label="notifications off">🔕</span>` : ""}${edit}</h3>
       <div class="meta">${k.n} legs · ${rules}</div>
       <div class="kp"><div>NET P&amp;L<b class="${pnlCls(k.pnl)}">${moneyK(k.pnl)}</b></div>
-        <div>WIN<b>${st.win_rate == null ? "—" : Math.round(st.win_rate * 100) + "%"}</b></div><div>OPEN<b>${k.open}</b></div></div>
+        <div>WIN<b>${st.win_rate == null ? "—" : Math.round(st.win_rate * 100) + "%"}</b></div><div>OPEN<b>${k.open}</b></div>${hedgedKpi(st)}</div>
       ${path ? `<svg class="spark" viewBox="0 0 200 34" preserveAspectRatio="none"><title>${esc(shapeTitle)}</title><path d="${path}" stroke="${esc(st.color)}" stroke-width="2" fill="none"/></svg>` : `<div class="spark empty"></div>`}
       <div class="cards">
         ${legsHere.slice(0, limit).map(lg => {
@@ -525,6 +541,14 @@ function openStratDlg(st) {
   $("ns-color").value = st && /^#[0-9a-f]{6}$/i.test(st.color || "") ? st.color : "#9b7be0";
   $("ns-desc").value = st ? (st.description || "") : "";
   $("ns-notify").checked = st ? st.send_notifications !== false : true;
+  // build 22: Position hedged
+  const coins = hedgeCoins(st);
+  $("ns-hccy").innerHTML = coins.length
+    ? coins.map(c => `<option value="${esc(c.ccy)}">${esc(c.label)}</option>`).join("")
+    : `<option value="">no assets with a balance</option>`;
+  $("ns-hccy").value = (st && st.hedged_ccy) || (coins[0] || {}).ccy || "";
+  $("ns-hccy").disabled = $("ns-hq").disabled = !coins.length;
+  $("ns-hq").value = st && st.hedged_qty != null ? st.hedged_qty : "";
   $("ns-save").textContent = st ? "Save" : "Create";
   $("ns-save").disabled = false;
   const del = $("ns-delete");
@@ -533,8 +557,10 @@ function openStratDlg(st) {
   openDlg("dlg-strat"); setTimeout(() => $("ns-name").focus(), 30);
 }
 async function saveStrategy() {
+  const hq = $("ns-hq").value.trim();
   const body = {name: $("ns-name").value, color: $("ns-color").value, description: $("ns-desc").value,
-                send_notifications: $("ns-notify").checked};
+                send_notifications: $("ns-notify").checked,
+                hedged_qty: hq === "" ? null : hq, hedged_ccy: hq === "" ? null : $("ns-hccy").value};
   $("ns-save").disabled = true;
   try {
     if (NS.id) {

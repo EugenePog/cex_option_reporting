@@ -207,4 +207,10 @@ table.bb-rv td{white-space:nowrap}
 .bb-toast.ok{border-color:#1c4a2b} .bb-toast.bad{border-color:#5b1e22;color:#f7a6a6}
 /* build 11: the box's seed key in the Edit box dialog */
 .bb-key{color:#8b93a1;font-size:12px}
+/* build 22: Position hedged in the box dialog + on the box card */
+.bb-hedge{display:flex;gap:8px;align-items:center}
+.bb-hedge input{flex:1}
+.bb-hedge select{width:auto;min-width:90px}
+.bb-form small.bb-hint{text-transform:none;letter-spacing:0;font-size:11.5px;line-height:1.35;color:var(--muted)}
+.bb-col .kp b.hq{color:#c7cdd6}
 .bb-key code{color:#c7cdd6}

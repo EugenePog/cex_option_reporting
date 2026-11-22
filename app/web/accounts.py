@@ -16,10 +16,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from sqlalchemy import select, union
+from sqlalchemy import func, select, union
 
 from app.db.models_core import CexAccount, Subaccount
-from app.db.models_gold import DealLedger, PositionCurrent
+from app.db.models_gold import AssetBalanceTimeseries, DealLedger, PositionCurrent
 from app.db.models_gold import PositionLeg as GoldPositionLeg
 
 
@@ -56,6 +56,24 @@ def default_account_id(s, ids: Iterable[int]) -> int | None:
 def account_labels(s, ids: Iterable[int]) -> dict[int, str]:
     """{subaccount_id: label}."""
     return {a["id"]: a["label"] for a in account_options(s, ids)}
+
+
+def account_assets(s, subaccount_id: int) -> list[dict]:
+    """build 22 — the assets an account holds now, for the Box builder's Position hedged: the rule of
+    the build 16 Settings editor (balance now = the amount in the account's LATEST snapshot of
+    gold.asset_balance_timeseries, 0 when the asset is not in it), non-zero balances only.
+    [{ccy, balance}] sorted by ccy (ccy upper-case)."""
+    A = AssetBalanceTimeseries
+    last = s.execute(select(func.max(A.captured_at)).where(A.subaccount_id == subaccount_id)
+                     ).scalar_one_or_none()
+    if last is None:
+        return []
+    bal: dict[str, float] = {}
+    for ccy, amount in s.execute(select(A.ccy, A.amount).where(
+            A.subaccount_id == subaccount_id, A.captured_at == last, A.ccy.isnot(None))):
+        if ccy and amount is not None:
+            bal[ccy.upper()] = bal.get(ccy.upper(), 0.0) + float(amount)
+    return [{"ccy": c, "balance": b} for c, b in sorted(bal.items()) if b != 0]
 
 
 def account_underlyings(s, subaccount_ids: Iterable[int]) -> list[str]:

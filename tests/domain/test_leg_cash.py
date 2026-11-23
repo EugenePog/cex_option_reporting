@@ -100,3 +100,69 @@ def test_stable_fee_and_missing_price_and_stale_leg():
     assert apply([CashEvent(T0, 1.0, -0.01, px=None)]) == (0.0, 0.0, 1)
     assert leg_cash(LegInfo(status="stale", side="long", opened_at=T0), 1.0, 1.0, NO_PX) is None
     assert leg_cash(LegInfo(status="open", side="long", opened_at=T0), None, None, NO_PX) is None
+
+
+# --------------------------------------------------------------------------- build 23
+def test_premium_is_the_opening_side_closing_the_rest():
+    # build 24 — the partial close above: sold 2 @ 0.01 (+0.02) at 100k with fee −0.0003 →
+    # premium − fees +0.0197 BTC / +1970 USD; bought back 1 @ 0.004 at 90k, fee −0.0002 →
+    # closing −0.0042 BTC / −378 USD
+    leg = LegInfo(status="open", side="short", opened_at=T0, size=1, fills=[
+        Fill(T0, "sell", 2, 0.01, -0.0003, "BTC", 100_000),
+        Fill(T0 + 5 * H, "buy", 1, 0.004, -0.0002, "BTC", 90_000)])
+    c = leg_cash(leg, ct_val=1.0, size_coin=1.0, px_at=NO_PX)
+    assert c.premium_coin == approx(0.0197) and c.premium_usd == approx(1970)
+    assert c.close_coin == approx(-0.0042) and c.close_usd == approx(-378)
+
+
+def test_expiry_settlement_is_closing_not_premium():
+    # long put bought 0.02 at 50k, fee −0.0001: premium − fees = −0.0201 BTC / −1005 USD; the 0.05
+    # BTC the put paid at expiry is closing, at the settlement price 40k = +2000 USD
+    leg = LegInfo(status="closed", side="long", opened_at=T0, closed_at=T0 + 48 * H,
+                  close_type="expiry", size=1, realized_pnl=0.0299,
+                  fills=[Fill(T0, "buy", 1, 0.02, -0.0001, "BTC", 50_000)])
+    c = leg_cash(leg, ct_val=1.0, size_coin=1.0, px_at=NO_PX, settle_px=40_000)
+    assert c.premium_coin == approx(-0.0201) and c.premium_usd == approx(-1005)
+    assert c.close_coin == approx(0.05) and c.close_usd == approx(2000)
+    assert c.premium_coin + c.close_coin == approx(0.0299)             # = OKX realizedPnl
+    # summary source, expired short call: entry 0.01 at 100k, fee −0.0005 → with the opening (no
+    # closing trade at an expiry): premium − fees 0.0095 BTC / 950 USD; the settlement −0.004 BTC
+    # at 105k = −420 USD
+    leg = LegInfo(status="closed", side="short", opened_at=T0, closed_at=T0 + 24 * H,
+                  close_type="expiry", size=1, entry_px=0.01, fee=-0.0005, realized_pnl=0.0055)
+    px = {T0: 100_000, T0 + 24 * H: 105_000}
+    c = leg_cash(leg, ct_val=1.0, size_coin=1.0, px_at=px.get, settle_px=105_000)
+    assert c.source == "summary"
+    assert c.premium_coin == approx(0.0095) and c.premium_usd == approx(950)
+    assert c.close_coin == approx(-0.004) and c.close_usd == approx(-420)
+    assert c.realized_usd == approx(530)
+
+
+def test_premium_net_stable_fee_in_coin_at_the_trade_price():
+    leg = LegInfo(status="open", side="short", opened_at=T0, size=1, fills=[
+        Fill(T0, "sell", 1, 0.01, -5.0, "USDT", 100_000)])
+    c = leg_cash(leg, ct_val=1.0, size_coin=1.0, px_at=NO_PX)
+    assert c.premium_coin == approx(0.01 - 0.00005) and c.premium_usd == approx(995)
+
+
+def test_premium_per_day_of_a_leg_and_a_box():
+    from app.domain.leg_cash import PremiumSpan, leg_end, premium_per_day
+    exp = T0 + 120 * H
+    # open leg → its expiry; closed → its close; stale → last seen
+    assert leg_end("open", exp, None) == exp
+    assert leg_end("closed", exp, T0 + 30 * H) == T0 + 30 * H
+    assert leg_end("stale", exp, None, T0 + 7 * H) == T0 + 7 * H
+    a = PremiumSpan(T0, exp, 0.05, 5000.0)                       # 5 days
+    p = premium_per_day([a])
+    assert p["days"] == approx(5) and p["coin_per_day"] == approx(0.01)
+    assert p["usd_per_day"] == approx(1000) and p["n_missing"] == 0
+    # box: earliest opening (T0 − 1 day) → latest end (exp + 2 days) = 8 days; Σ = 0.05 − 0.01
+    b = PremiumSpan(T0 - 24 * H, T0 + 30 * H, -0.01, -900.0)
+    c = PremiumSpan(T0 + H, exp + 48 * H, None, None)              # no cash data: dates count
+    p = premium_per_day([a, b, c])
+    assert p["start"] == T0 - 24 * H and p["end"] == exp + 48 * H and p["days"] == approx(8)
+    assert p["coin"] == approx(0.04) and p["usd"] == approx(4100)
+    assert p["coin_per_day"] == approx(0.005) and p["usd_per_day"] == approx(512.5)
+    assert p["n_missing"] == 1
+    p = premium_per_day([c])
+    assert p["coin"] is None and p["coin_per_day"] is None and p["days"] == approx(167 / 24)

@@ -588,6 +588,59 @@ pm2 restart web       # Box builder dialog + card, graph ① panel, Settings wit
   what the dialog set). `seed/<env>/hedged_position.csv` files are no longer loaded — delete them.
 - Check: `psql "$DATABASE_URL" -c "select subaccount_id, name, hedged_qty, hedged_ccy from core.strategy where hedged_qty is not null;"`.
 
+### 10r. Premium per day in graph ①'s hovers (build 23, migration 0029)
+
+```bash
+make migrate                 # 0029: gold.position_leg + premium_net_coin, premium_net_usd
+pm2 restart pipeline web     # the next pipeline run fills them for all history (gold is rebuilt)
+```
+
+- **Hover a leg** on graph ①: *premium − fees* in coin and USD, *duration* in days, *per day*.
+  Premium = every trade's premium (sold +, bought −, opening and closing trades) plus all fees;
+  USD at each trade's index price (as the PnL switches). The payout at expiry is not premium.
+  Duration = opening → expiry (open) / close (closed).
+- **Hover a box**: the sum over its legs in the reporting period; duration from the earliest
+  opening to the latest end; per day = sum ÷ duration.
+- Check: `psql "$DATABASE_URL" -c "select status, cash_source, count(*), count(premium_net_coin), round(sum(premium_net_usd)) from gold.position_leg group by 1, 2 order by 1, 2;"`
+  — stale legs have none (no cash computed for them); open / closed legs all should.
+
+### 10s. Expiry by time + P&L split in the hovers (build 24, migration 0030)
+
+```bash
+make migrate                 # 0030: gold.position_leg + close_net_coin, close_net_usd
+pm2 restart pipeline web     # the next run recomputes all history (close types, cash, splits)
+```
+
+- **Expiry** = a position closed within ±5 minutes of 08:00 UTC on its expiry date (OKX's `type`
+  has no expiry code; 3 is liquidation). Legs closed at expiry now say *expired* (graph ① hover,
+  Box builder).
+- **Hover P&L** (leg and box), in coin and USD: *premium − fees* (opening trades and their fees, at
+  the opening prices) + *settlement* / *closing* (closing trades, the expiry settlement and their
+  fees, at the closing prices; expiry at the settlement price) — an open leg adds *value now* at the
+  current price. A closed leg's coin P&L equals OKX realizedPnl.
+- Checks after the run:
+  ```sql
+  select close_type, count(*) from gold.position_leg where status = 'closed' group by 1;   -- most 'expiry' now
+  select inst_id, close_type, cash_source, premium_net_coin, close_net_coin,
+         premium_net_coin + close_net_coin - realized_pnl as diff          -- ≈ 0
+    from gold.position_leg where inst_id = 'BTC-USD-261119-65000-P';
+  ```
+
+### 10t. Graph ② / ②b / Analyze in USD as graph ① (build 25, migration 0031)
+
+```bash
+make migrate                 # 0031: gold.deal_ledger + fees_usd, usd_basis
+pm2 restart pipeline web     # the next run recomputes deal_ledger, pnl_daily, asset_pnl_daily
+```
+
+- A closed position's USD = premium + opening fees at the opening prices + buy-backs / settlement
+  and their fees at the closing prices (graph ①'s rule). Only positions without trade-price data
+  keep the old rule (coin × the closing day's rate) — `usd_basis = 'day rate'`.
+- **②**: hover equity in USD and coin, daily net P&L in USD and coin. **②b**: balance and daily
+  P&L in coin and USD. **Analyze**: every amount in USD and coin; win rate / averages / profit
+  factor on USD; the note under the KPIs says how many deals used the day rate.
+- Check: `select usd_basis, count(*), round(sum(realized_pnl_usd), 2), round(sum(realized_pnl), 6) from gold.deal_ledger group by 1;`
+
 ---
 
 ## Running everything as services (pm2)

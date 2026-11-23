@@ -26,6 +26,7 @@
   <div class="kpi"><div class="label">Profit factor</div><div class="val" id="k-pf">–</div><div class="sub">gross win ÷ loss</div></div>
   <div class="kpi"><div class="label">Max drawdown</div><div class="val" id="k-dd">–</div><div class="sub">peak-to-trough</div></div>
 </div>
+<p class="hint" id="usd-note" style="margin:-8px 0 14px;font-size:12px;color:var(--muted)"></p>
 
 <div class="grid cols-2">
   <div class="card">
@@ -40,7 +41,7 @@
 <div class="card" id="deals-card" style="margin-top:18px;display:none">
   <h2>Deals <span class="muted" id="deals-title"></span></h2>
   <table><thead><tr><th>Instrument</th><th>Side</th><th>Close</th><th>Opened</th><th>Closed</th>
-    <th>Entry</th><th>Exit</th><th>Size</th><th>Realized</th><th>Hold d</th></tr></thead>
+    <th>Entry</th><th>Exit</th><th>Size</th><th>Realized (coin)</th><th>Realized (USD)</th><th>Hold d</th></tr></thead>
   <tbody id="deals-body"></tbody></table>
 </div>
 
@@ -79,13 +80,20 @@ async function boot(){
   }, document.getElementById("auto-refresh"));
 }
 let DEALS = null;
+// build 25: amounts in USD (operation-time prices, as graph ①) and in the settlement coin
+const fmtC = (v, c) => v == null ? "" : (v > 0 ? "+" : v < 0 ? "−" : "") + String(+Math.abs(v).toFixed(6)) + (c ? " " + c : "");
+const coinLine = (v, c, mixed) => mixed ? `<span class="coinv">mixed coins</span>` : (v == null ? "" : `<span class="coinv">${fmtC(v, c)}</span>`);
 
 async function refresh(){
   const d = await api("/analyze", state); if(!d) return;
   const k = d.kpis;
   document.getElementById("deal-count").textContent = (k.n_deals||0).toLocaleString()+" deals";
   const net = document.getElementById("k-netpnl");
-  net.textContent = usdK(k.net_pnl); net.className = "val "+signCls(k.net_pnl);
+  net.innerHTML = usdK(k.net_pnl) + coinLine(k.net_pnl_coin, k.coin, k.mixed_coins); net.className = "val "+signCls(k.net_pnl);
+  const nb = k.usd_basis || {}, nDay = nb["day rate"] || 0;
+  document.getElementById("usd-note").textContent = "USD at the price of each trade — premium and opening fees at the opening prices, " +
+    "buy-backs, settlement and their fees at the closing prices (as graph ① on the Dashboard)" +
+    (nDay ? ` · ${nDay} of ${k.n_deals} deals at the closing day's rate (no trade data)` : "") + ". Win rate, averages and profit factor on USD.";
   document.getElementById("k-return").innerHTML = k.return_pct==null?"":`<span class="${signCls(k.return_pct)}">${pct(k.return_pct)} return</span>`;
   document.getElementById("k-winrate").textContent = k.win_rate==null?"–":(k.win_rate*100).toFixed(1)+"%";
   const wins = Math.round((k.win_rate||0)*(k.n_deals||0));
@@ -93,7 +101,9 @@ async function refresh(){
   const ratio = (k.avg_win!=null && k.avg_loss) ? (k.avg_win/Math.abs(k.avg_loss)) : null;
   document.getElementById("k-avg").textContent = ratio==null?"–":ratio.toFixed(2)+"×";
   document.getElementById("k-avgsub").textContent =
-    (k.avg_win!=null?usdK(k.avg_win):"–")+" vs "+(k.avg_loss!=null?usdK(k.avg_loss):"–");
+    (k.avg_win!=null?usdK(k.avg_win):"–")+" vs "+(k.avg_loss!=null?usdK(k.avg_loss):"–") +
+    (k.coin && (k.avg_win_coin!=null || k.avg_loss_coin!=null)
+      ? ` · ${k.avg_win_coin!=null?fmtC(k.avg_win_coin):"–"} vs ${k.avg_loss_coin!=null?fmtC(k.avg_loss_coin):"–"} ${k.coin}` : "");
   document.getElementById("k-pf").textContent = k.profit_factor==null?"–":k.profit_factor.toFixed(2);
   const dd = document.getElementById("k-dd");
   dd.textContent = k.max_drawdown_pct==null?"–":"−"+k.max_drawdown_pct.toFixed(1)+"%"; dd.className="val neg";
@@ -104,8 +114,8 @@ async function refresh(){
     const tr=document.createElement("tr"); tr.onclick=()=>showDeals(r.strategy_id, r.name);
     tr.innerHTML = `<td><span class="dot" style="background:${r.color||'#888'}"></span>${r.name}</td>
       <td>${r.n_deals}</td><td>${r.win_rate==null?'–':(r.win_rate*100).toFixed(0)+'%'}</td>
-      <td class="${signCls(r.net_pnl)}">${usdK(r.net_pnl)}</td>
-      <td>${r.avg_pnl_per_deal==null?'–':usdK(r.avg_pnl_per_deal)}</td>
+      <td class="${signCls(r.net_pnl)}">${usdK(r.net_pnl)}<small class="coinv">${fmtC(r.net_pnl_coin, r.coin)}</small></td>
+      <td>${r.avg_pnl_per_deal==null?'–':usdK(r.avg_pnl_per_deal)}<small class="coinv">${fmtC(r.avg_pnl_per_deal_coin, r.coin)}</small></td>
       <td>${r.profit_factor==null?'–':r.profit_factor.toFixed(2)}</td>`;
     tb.appendChild(tr);
   }
@@ -114,7 +124,8 @@ async function refresh(){
   Plotly.newPlot("c-symbol", [{
     type:"bar", orientation:"h", y:syms.map(s=>s.underlying), x:syms.map(s=>s.net_pnl),
     marker:{color: syms.map(s=>s.net_pnl>=0?COL.blue:COL.red)},
-    hovertemplate:"%{y}<br>net %{x:$,.0f}<extra></extra>"
+    customdata: syms.map(s => s.coin ? fmtC(s.net_pnl_coin, s.coin) : "mixed coins"),
+    hovertemplate:"%{y}<br>net %{x:$,.0f} · %{customdata}<extra></extra>"
   }], layout({ xaxis:{title:"Net P&L (USD)"}, yaxis:{type:"category",autorange:"reversed"},
     showlegend:false, margin:{l:70,r:16,t:10,b:36} }), CFG);
 }
@@ -130,7 +141,8 @@ async function showDeals(strategyId, name, quiet){
     tr.innerHTML = `<td>${r.inst_id}</td><td>${r.side||''}</td><td>${r.close_type||''}</td>
       <td>${(r.opened_at||'').slice(0,10)}</td><td>${(r.closed_at||'').slice(0,10)}</td>
       <td>${r.entry_px}</td><td>${r.exit_px}</td><td>${r.size}</td>
-      <td class="${signCls(r.realized_pnl)}">${r.realized_pnl.toFixed(6)}</td><td>${r.hold_days??''}</td>`;
+      <td class="${signCls(r.realized_pnl)}">${fmtC(r.realized_pnl, r.coin)}</td>
+      <td class="${signCls(r.realized_pnl_usd)}" title="${r.usd_basis === 'trades' ? 'at the prices of the trades' : "at the closing day's rate (no trade data)"}">${r.realized_pnl_usd==null?'–':usd(r.realized_pnl_usd, 2)}${r.usd_basis === 'trades' ? '' : ' *'}</td><td>${r.hold_days??''}</td>`;
     tb.appendChild(tr);
   }
   if (!quiet) document.getElementById("deals-card").scrollIntoView({behavior:"smooth"});

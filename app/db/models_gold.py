@@ -186,7 +186,11 @@ class DealLedger(Base):
     size: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     fee: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     realized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
-    realized_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # coin×rate (=② basis)
+    # build 25: USD as graph ① — premium + opening fees at the opening prices, closing / settlement at
+    # the closing prices (usd_basis 'trades'); 'day rate' (coin × the close day's rate) without cash data
+    realized_pnl_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    fees_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)          # build 25 (0031)
+    usd_basis: Mapped[str | None] = mapped_column(String(10), nullable=True)        # trades | day rate
     hold_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
@@ -368,6 +372,14 @@ class PositionLeg(Base):
     realized_cash_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     cash_source: Mapped[str | None] = mapped_column(String(10), nullable=True)
     cash_missing_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # build 23 (0029) / 24: P&L split for graph ①'s hovers, coin and USD at operation-time prices —
+    # premium − fees = the trades that opened / added to the position with their fees (opening
+    # prices); close_net = the rest: buy-backs / sales, the expiry settlement, their fees (closing
+    # prices; expiry: settlement price). premium_net + close_net = the leg's P&L (closed: realizedPnl)
+    premium_net_coin: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    premium_net_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    close_net_coin: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    close_net_usd: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
 
 class BoxShape(Base):

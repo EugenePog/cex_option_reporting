@@ -48,6 +48,7 @@ from app.domain.boxes import (
 )
 from app.domain.hedge import OptionLeg, hedge_profile
 from app.domain.hedge import payoff as leg_payoff   # `payoff` is graph ③'s endpoint
+from app.domain.leg_cash import PremiumSpan, leg_end, premium_per_day
 from app.domain.metrics import deal_metrics, equity_metrics
 from app.domain.instruments import OPTION_SETTLE_UTC as OKX_SETTLE_UTC  # 08:00 UTC on expiry day
 from app.domain.pricing import black76_price, payoff_intrinsic
@@ -198,7 +199,8 @@ def asset_equity(ccy: str | None = None, subaccount: int | None = None,
             ccy = latest[0] if latest else None
         bal_rows, pnl_rows = [], []
         if ccy:
-            bq = select(AssetBalanceTimeseries.captured_at, func.sum(AssetBalanceTimeseries.amount)) \
+            bq = select(AssetBalanceTimeseries.captured_at, func.sum(AssetBalanceTimeseries.amount),
+                        func.sum(AssetBalanceTimeseries.usd_value)) \
                 .where(AssetBalanceTimeseries.subaccount_id.in_(subs), AssetBalanceTimeseries.ccy == ccy)
             if lo is not None:
                 bq = bq.where(AssetBalanceTimeseries.captured_at >= lo)
@@ -208,7 +210,7 @@ def asset_equity(ccy: str | None = None, subaccount: int | None = None,
                                  .order_by(AssetBalanceTimeseries.captured_at)).all()
             pq = select(AssetPnlDaily.date, func.sum(AssetPnlDaily.net_pnl),
                         func.sum(AssetPnlDaily.realized_pnl), func.sum(AssetPnlDaily.unrealized_pnl),
-                        func.sum(AssetPnlDaily.fees)) \
+                        func.sum(AssetPnlDaily.fees), func.sum(AssetPnlDaily.net_pnl_usd)) \
                 .where(AssetPnlDaily.subaccount_id.in_(subs), AssetPnlDaily.ccy == ccy)
             if fd is not None:
                 pq = pq.where(AssetPnlDaily.date >= fd)
@@ -221,14 +223,18 @@ def asset_equity(ccy: str | None = None, subaccount: int | None = None,
             AssetPnlDaily.date, (AssetPnlDaily.subaccount_id.in_(subs), AssetPnlDaily.ccy == ccy),
         ) if ccy else [None, None]
     # build 10: times in UTC (as graph ①), whatever the database session's time zone
-    balance = [{"t": _iso(t), "v": _f(v)} for t, v in bal_rows]
+    # build 25: + USD — the balance at OKX's own USD value of that snapshot (the price of the
+    # moment); the daily net P&L at operation-time prices (gold, as graph ①)
+    balance = [{"t": _iso(t), "v": _f(v), "usd": _num(u)} for t, v, u in bal_rows]
     pnl = [{"date": d.isoformat(), "net": _f(n), "realized": _f(r), "unrealized": _f(u),
-            "fees": _f(fee)} for d, n, r, u, fee in pnl_rows]
+            "fees": _f(fee), "net_usd": _num(nu)} for d, n, r, u, fee, nu in pnl_rows]
     header = {}
     if balance:
         first, last = balance[0]["v"], balance[-1]["v"]
+        fu, lu = balance[0]["usd"], balance[-1]["usd"]
         header = {"delta": last - first, "pct": (last / first - 1) * 100 if first else None,
-                  "since": balance[0]["t"][:10]}
+                  "since": balance[0]["t"][:10],
+                  "delta_usd": lu - fu if lu is not None and fu is not None else None}
     return {"ccy": ccy, "balance": balance, "pnl": pnl, "header": header, "available": available}
 
 
@@ -375,8 +381,20 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
     hedge = _hedge_block(in_legend, now, _f(last[1]) if last else None,
                          _iso(last[0]) if last else None, box_qty, coin_ul, acct_name)
     box_legs: dict[tuple, list] = defaultdict(list)   # the shown legs of each box → its split
-    for _lg, dom in pairs:
+    spans: dict[int, PremiumSpan] = {}                # build 23: premium − fees per leg
+    box_spans: dict[tuple, list] = defaultdict(list)
+    s_now = _f(last[1]) if last else None             # build 24: open legs' value now
+    pnls: dict[int, dict | None] = {}
+    box_pnls: dict[tuple, list] = defaultdict(list)
+    for lg, dom in pairs:
+        pnls[lg.position_leg_id] = _leg_pnl(lg, s_now)
+        box_pnls[(dom.subaccount_id, dom.strategy_id)].append(pnls[lg.position_leg_id])
         box_legs[(dom.subaccount_id, dom.strategy_id)].append(dom)
+        sp = spans[lg.position_leg_id] = PremiumSpan(
+            start=lg.pos_opened_at,
+            end=leg_end(lg.status, lg.expires_at, lg.closed_at, lg.last_seen_at),
+            coin=_num(lg.premium_net_coin), usd=_num(lg.premium_net_usd))
+        box_spans[(dom.subaccount_id, dom.strategy_id)].append(sp)
     out_boxes = []
     for i, b in enumerate(boxes):
         name, color = meta.get(b.strategy_id, ("(no box)", None))
@@ -394,6 +412,9 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
             "size_coin": size_coin, "size_contracts": size_ct, "coin": b.coin, "label": label,
             "split": size_split(box_legs.get((b.subaccount_id, b.strategy_id), [])),
             "net_pnl_usd": _num(b.net_pnl_usd),
+            # build 23: Σ premium − fees of its legs, earliest opening → latest end, per day
+            "premium": _premium_json(box_spans.get((b.subaccount_id, b.strategy_id), [])),
+            "pnl": _pnl_sum(box_pnls.get((b.subaccount_id, b.strategy_id), [])),   # build 24
         })
     out_legs = [{
         "id": lg.position_leg_id, "box": box_key.get((lg.subaccount_id, lg.strategy_id)),
@@ -403,6 +424,8 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
         "closed_early": closed_early(dom),
         "opened_at": _iso(lg.pos_opened_at), "expires_at": _iso(lg.expires_at),
         "closed_at": _iso(lg.closed_at), "pnl_usd": dom.pnl_usd,
+        "premium": _premium_json([spans[lg.position_leg_id]]),     # build 23
+        "pnl": pnls[lg.position_leg_id],                            # build 24
     } for lg, dom in pairs]
     exposure = [{"t0": _iso(sg.t0), "t1": _iso(sg.t1), "total": sg.total,
                  "call_long": sg.call_long, "call_short": sg.call_short,
@@ -422,6 +445,55 @@ def price_boxes(underlying: str | None = None, subaccount: int | None = None, ba
         "boxes": out_boxes, "legs": out_legs, "exposure": exposure,
         "hedge": hedge,                              # build 18: the future-PnL panel
     }
+
+
+def _leg_pnl(lg, s_now: float | None) -> dict | None:
+    """build 24 — a leg's P&L for graph ①'s hover, coin and USD:
+    premium − fees (opening trades + their fees, USD at the opening prices) + closing (trades that
+    reduced / closed it, the expiry settlement and their fees, USD at the closing prices; expiry at
+    the settlement price). An OPEN leg adds the value of what is still open, now: OKX upl + its
+    cost at avgPx (= ±markPx × size), in USD at the current price `s_now`. None when the leg has no
+    cash data (stale legs, no contract size) — the page then shows the old day-rate P&L."""
+    p_c, p_u = _num(lg.premium_net_coin), _num(lg.premium_net_usd)
+    c_c, c_u = _num(lg.close_net_coin), _num(lg.close_net_usd)
+    if p_c is None or c_c is None or lg.status not in ("open", "closed"):
+        return None
+    if lg.status == "closed":
+        kind = "settlement" if lg.close_type == "expiry" else "closing"
+    else:
+        q, avg, upl = _num(lg.size_coin), _num(lg.entry_px), _num(lg.upl)
+        if q is None or avg is None or upl is None:
+            return None
+        value = upl + (abs(q) * avg if (lg.side or "").lower() == "long" else -abs(q) * avg)
+        kind = "value now" if abs(c_c) < 1e-12 else "closing + value now"
+        c_c += value
+        c_u = c_u + value * s_now if s_now is not None and c_u is not None else None
+    return {"coin": p_c + c_c, "usd": (p_u + c_u) if p_u is not None and c_u is not None else None,
+            "premium_coin": p_c, "premium_usd": p_u, "close_coin": c_c, "close_usd": c_u,
+            "close_kind": kind}
+
+
+def _pnl_sum(items: list[dict | None]) -> dict | None:
+    """build 24 — a box's P&L: the sum of its legs' (legs without data counted in n_missing)."""
+    have = [x for x in items if x is not None]
+    if not have:
+        return None
+    tot = lambda k: (sum(x[k] for x in have)                      # noqa: E731
+                     if all(x[k] is not None for x in have) else None)
+    kinds = {x["close_kind"] for x in have}
+    kind = (kinds.pop() if len(kinds) == 1
+            else "closing + value now" if any("value now" in k for k in kinds)
+            else "settlement + closing")
+    return {"coin": tot("coin"), "usd": tot("usd"), "premium_coin": tot("premium_coin"),
+            "premium_usd": tot("premium_usd"), "close_coin": tot("close_coin"),
+            "close_usd": tot("close_usd"), "close_kind": kind,
+            "n_missing": len(items) - len(have)}
+
+
+def _premium_json(spans: list[PremiumSpan]) -> dict:
+    """build 23 — premium − fees, duration and per day for graph ①'s leg / box hover."""
+    p = premium_per_day(spans)
+    return {**p, "start": _iso(p["start"]), "end": _iso(p["end"])}
 
 
 def _hedge_block(rows, now: datetime, s0: float | None, s0_at: str | None,
@@ -576,17 +648,66 @@ def equity(subaccount: int | None = None, frm: str | None = None, till: str | No
         available = _available(s, BalanceTimeseries.captured_at,
                                (BalanceTimeseries.subaccount_id.in_(subs),),
                                PnlDaily.date, (PnlDaily.subaccount_id.in_(subs),))
+        # build 25: equity also in the account's coin (the coin of its main underlying) at the
+        # price of each snapshot's moment
+        chosen = _price_source(s, subs, None)[0]
+        coin = chosen.split("-")[0] if chosen else None
+        px = _coin_prices(s, subs, chosen, [t for t, _v in eq_rows]) if coin else {}
     # build 10: times in UTC (as graph ①), whatever the database session's time zone
-    equity_series = [{"t": _iso(t), "v": _f(v)} for t, v in eq_rows]
+    equity_series = [{"t": _iso(t), "v": _f(v),
+                      "coin": (_f(v) / px[t]) if px.get(t) else None} for t, v in eq_rows]
     pnl = [{"date": d.isoformat(), "net": _f(n), "realized": _f(r),
             "unrealized": _f(u), "fees": _f(fee), "net_coin": _f(nc)}
            for d, n, r, u, fee, nc in pnl_rows]
     header = {}
     if equity_series:
-        first, last = equity_series[0]["v"], equity_series[-1]["v"]
-        header = {"delta": last - first, "pct": (last / first - 1) * 100 if first else None,
-                  "since": equity_series[0]["t"][:10]}
-    return {"equity": equity_series, "pnl": pnl, "header": header, "available": available}
+        first, last = equity_series[0], equity_series[-1]
+        header = {"delta": last["v"] - first["v"],
+                  "pct": (last["v"] / first["v"] - 1) * 100 if first["v"] else None,
+                  "since": first["t"][:10],
+                  "delta_coin": (last["coin"] - first["coin"])
+                  if last["coin"] is not None and first["coin"] is not None else None}
+    return {"equity": equity_series, "pnl": pnl, "header": header, "available": available,
+            "coin": coin}
+
+
+def _coin_prices(s, subs: list[int], underlying: str, times: list[datetime]) -> dict:
+    """build 25 — USD price of the coin at each moment in `times` (graph ②'s snapshots): OKX's
+    own price in that balance snapshot (usd_value ÷ amount of the coin), else the index price of
+    the position snapshot at that moment, else the close of the 1h index candle that contains it."""
+    if not times:
+        return {}
+    coin, t0, t1 = underlying.split("-")[0], min(times), max(times)
+    out: dict = {}
+    for t, amt, usd_v in s.execute(
+            select(AssetBalanceTimeseries.captured_at, func.sum(AssetBalanceTimeseries.amount),
+                   func.sum(AssetBalanceTimeseries.usd_value))
+            .where(AssetBalanceTimeseries.subaccount_id.in_(subs),
+                   AssetBalanceTimeseries.ccy == coin,
+                   AssetBalanceTimeseries.captured_at >= t0, AssetBalanceTimeseries.captured_at <= t1)
+            .group_by(AssetBalanceTimeseries.captured_at)):
+        if amt and usd_v and _f(amt) > 0:
+            out[t] = _f(usd_v) / _f(amt)
+    for t, idx in s.execute(
+            select(UnderlyingPrice.captured_at, func.max(UnderlyingPrice.idx_px))
+            .where(UnderlyingPrice.subaccount_id.in_(subs), UnderlyingPrice.underlying == underlying,
+                   UnderlyingPrice.captured_at >= t0, UnderlyingPrice.captured_at <= t1,
+                   UnderlyingPrice.idx_px.isnot(None))
+            .group_by(UnderlyingPrice.captured_at)):
+        out.setdefault(t, _f(idx))
+    missing = [t for t in times if t not in out]
+    if missing:
+        bars = s.execute(select(IndexCandle.ts, IndexCandle.close).where(
+            IndexCandle.inst_id == underlying, IndexCandle.bar == "1h",
+            IndexCandle.ts >= min(missing) - timedelta(hours=1), IndexCandle.ts <= max(missing))
+            .order_by(IndexCandle.ts)).all()
+        i = 0
+        for t in sorted(missing):
+            while i + 1 < len(bars) and bars[i + 1][0] <= t:
+                i += 1
+            if bars and bars[i][0] <= t:
+                out[t] = _f(bars[i][1])
+    return out
 
 
 # ④ Strike × expiry position map ------------------------------------------- #
@@ -838,37 +959,66 @@ def analyze(period: str = "all", underlying: str | None = None, strategy: int | 
         deals = [d for d in deals if d.closed_at and d.closed_at.date() >= start]
         eq_rows = [(t, v) for t, v in eq_rows if t.date() >= start]
 
-    realized = [_f(d.realized_pnl) for d in deals]
-    dm = deal_metrics(realized)
+    # build 25: every amount in USD (gold deal_ledger.realized_pnl_usd — operation-time prices, as
+    # graph ①) AND in the settlement coin (OKX realizedPnl); metrics (win rate, averages, profit
+    # factor) on USD. Before, the coin values were shown as if they were USD.
+    dm = deal_metrics([_f(d.realized_pnl_usd) for d in deals])
     em = equity_metrics([_f(v) for _, v in eq_rows])
+    coin_k = _coin_metrics(deals)
+    basis: dict[str, int] = defaultdict(int)
+    for d in deals:
+        basis[d.usd_basis or "day rate"] += 1
     kpis = {"net_pnl": dm.net_pnl, "return_pct": em.return_pct, "win_rate": dm.win_rate,
             "n_deals": dm.n_deals, "avg_win": dm.avg_win, "avg_loss": dm.avg_loss,
-            "profit_factor": dm.profit_factor, "max_drawdown_pct": em.max_drawdown_pct}
+            "profit_factor": dm.profit_factor, "max_drawdown_pct": em.max_drawdown_pct,
+            **coin_k, "usd_basis": dict(basis)}
 
-    by_strat: dict[int, list[float]] = defaultdict(list)
-    by_symbol: dict[str, list[float]] = defaultdict(list)
+    by_strat: dict[int, list] = defaultdict(list)
+    by_symbol: dict[str, list] = defaultdict(list)
     for d in deals:
-        by_strat[d.strategy_id].append(_f(d.realized_pnl))
-        by_symbol[d.underlying or "?"].append(_f(d.realized_pnl))
+        by_strat[d.strategy_id].append(d)
+        by_symbol[d.underlying or "?"].append(d)
 
     strategies = []
-    for sid, pnls in by_strat.items():
-        m = deal_metrics(pnls)
+    for sid, ds in by_strat.items():
+        m = deal_metrics([_f(d.realized_pnl_usd) for d in ds])
         name, color = strat_meta.get(sid, ("(unassigned)", None))
+        c = _coin_metrics(ds)
         strategies.append({"strategy_id": sid, "name": name, "color": color,
                            "n_deals": m.n_deals, "win_rate": m.win_rate, "net_pnl": m.net_pnl,
                            "avg_pnl_per_deal": m.avg_pnl_per_deal,
-                           "profit_factor": m.profit_factor})
+                           "profit_factor": m.profit_factor, "coin": c["coin"],
+                           "net_pnl_coin": c["net_pnl_coin"],
+                           "avg_pnl_per_deal_coin": c["avg_pnl_per_deal_coin"]})
     strategies.sort(key=lambda r: r["net_pnl"], reverse=True)
 
     symbols = []
-    for uly, pnls in by_symbol.items():
-        m = deal_metrics(pnls)
+    for uly, ds in by_symbol.items():
+        m = deal_metrics([_f(d.realized_pnl_usd) for d in ds])
+        c = _coin_metrics(ds)
         symbols.append({"underlying": uly, "net_pnl": m.net_pnl, "n_deals": m.n_deals,
-                        "win_rate": m.win_rate, "profit_factor": m.profit_factor})
+                        "win_rate": m.win_rate, "profit_factor": m.profit_factor,
+                        "coin": c["coin"], "net_pnl_coin": c["net_pnl_coin"]})
     symbols.sort(key=lambda r: r["net_pnl"], reverse=True)
 
     return {"kpis": kpis, "strategies": strategies, "symbols": symbols}
+
+
+def _coin_of(underlying: str | None) -> str | None:
+    return underlying.split("-")[0] if underlying else None
+
+
+def _coin_metrics(deals) -> dict:
+    """build 25 — the coin side of a set of deals (OKX realizedPnl): net, average win / loss / per
+    deal, in the deals' settlement coin; all None when the deals settle in more than one coin."""
+    coins = {_coin_of(d.underlying) for d in deals}
+    if len(coins) != 1 or None in coins:
+        return {"coin": None, "net_pnl_coin": None, "avg_win_coin": None, "avg_loss_coin": None,
+                "avg_pnl_per_deal_coin": None, "mixed_coins": len(coins) > 1}
+    m = deal_metrics([_f(d.realized_pnl) for d in deals])
+    return {"coin": coins.pop(), "net_pnl_coin": m.net_pnl, "avg_win_coin": m.avg_win,
+            "avg_loss_coin": m.avg_loss, "avg_pnl_per_deal_coin": m.avg_pnl_per_deal,
+            "mixed_coins": False}
 
 
 @router.get("/deals")
@@ -897,5 +1047,8 @@ def deals(period: str = "all", underlying: str | None = None, strategy: int | No
             "closed_at": d.closed_at.isoformat() if d.closed_at else None,
             "entry_px": _f(d.entry_px), "exit_px": _f(d.exit_px), "size": _f(d.size),
             "fee": _f(d.fee), "realized_pnl": _f(d.realized_pnl), "hold_days": d.hold_days,
+            # build 25: + USD at operation-time prices (as graph ①) and the coin
+            "realized_pnl_usd": _num(d.realized_pnl_usd), "fees_usd": _num(d.fees_usd),
+            "usd_basis": d.usd_basis, "coin": _coin_of(d.underlying),
         })
     return {"deals": out}

@@ -29,6 +29,16 @@ Events come from the best source available for the leg:
              WHOLE fee at the closing time (expiry: the settlement price).
 
 Coin amounts follow OKX's sign: a cost is negative (fees, premium paid).
+
+build 23 / 24 — the leg's P&L split for graph ①'s hovers, in coin and in USD at the same
+operation-time prices:
+  premium − fees  the OPENING side: premium received (+) / paid (−) of every trade that opened or
+                  added to the position, with those trades' fees, USD at the opening prices;
+  closing         everything else: buy-backs / sales that reduced or closed it, the expiry
+                  settlement (payout), their fees, USD at the closing prices (expiry: settlement);
+  P&L             = premium − fees + closing (for a closed leg = OKX realizedPnl in coin).
+Without trade data (summary source) a traded close keeps the WHOLE fee at the closing price (build
+21); an expiry has no closing trade, so its whole fee goes with the opening (build 24).
 """
 from __future__ import annotations
 
@@ -49,6 +59,7 @@ class CashEvent:
     fee: float = 0.0            # coin (OKX sign: a cost is negative)
     px: float | None = None     # USD per coin at the event
     fee_usd: float | None = None   # a fee already in USD (charged in a stablecoin)
+    settle: bool = False        # build 23: `cash` is the expiry settlement, not a premium (closing)
 
 
 @dataclass
@@ -57,6 +68,11 @@ class LegCash:
     realized_usd: float
     source: str                 # fills | snapshots | summary
     missing_px: int = 0
+    premium_coin: float | None = None   # build 23/24: premium − fees of the opening trades, coin
+    premium_usd: float | None = None    # ... USD at the opening prices
+    close_coin: float | None = None     # build 24: closing trades + settlement + their fees, coin
+    close_usd: float | None = None      # ... USD at the closing prices (expiry: settlement price)
+    fee_usd: float | None = None        # build 25: all fees of the leg, USD at their operations' prices
 
 
 @dataclass(frozen=True)
@@ -124,6 +140,27 @@ def apply(events: Iterable[CashEvent]) -> tuple[float, float, int]:
     return basis, realized, missing
 
 
+def premium_net(events: Iterable[CashEvent]) -> tuple[float, float, float, float, float]:
+    """build 24 — (premium coin, premium USD, closing coin, closing USD, build 25: fees USD). An event that opens or
+    adds to the position (qty > 0) is premium − fees; every other one (reductions, closes, the
+    expiry settlement, lumps) is closing. Cash + fee of each, USD at the event's own price (an event
+    without one adds 0 USD, it is counted in `missing_px`); a fee charged in a stablecoin is
+    converted to coin at the event's price."""
+    p_coin = p_usd = c_coin = c_usd = fees_usd = 0.0
+    for e in events:
+        if e.fee_usd is not None:
+            fee_coin, fee_usd = (e.fee_usd / e.px if e.px else 0.0), e.fee_usd
+        else:
+            fee_coin, fee_usd = e.fee, e.fee * (e.px or 0.0)
+        fees_usd += fee_usd
+        coin, usd = e.cash + fee_coin, e.cash * (e.px or 0.0) + fee_usd
+        if e.qty > TOL and not e.settle:
+            p_coin, p_usd = p_coin + coin, p_usd + usd
+        else:
+            c_coin, c_usd = c_coin + coin, c_usd + usd
+    return p_coin, p_usd, c_coin, c_usd, fees_usd
+
+
 def fill_events(fills: Iterable[Fill], side: str | None, ct_val: float,
                 px_at: Callable[[datetime], float | None]) -> list[CashEvent]:
     out = []
@@ -188,13 +225,55 @@ def summary_events(leg: LegInfo, ct_val: float, px_open: float | None,
                    px_close: float | None) -> list[CashEvent]:
     q = abs(leg.size or 0.0) * ct_val
     opening = _sign(leg.side) * (leg.entry_px or 0.0) * q
-    out = [CashEvent(at=leg.opened_at, qty=q, cash=opening, px=px_open)]
+    expiry = leg.status == "closed" and leg.close_type == "expiry"
+    fee = (leg.fee or 0.0) if leg.status == "closed" else 0.0
+    # build 24: an expiry has no closing trade — its whole fee goes with the opening trade
+    out = [CashEvent(at=leg.opened_at, qty=q, cash=opening, fee=fee if expiry else 0.0,
+                     px=px_open)]
     if leg.status == "closed":
-        fee = leg.fee or 0.0
         pnl = (leg.realized_pnl or 0.0) - fee            # realizedPnl = pnl + fee
         out.append(CashEvent(at=leg.closed_at or leg.opened_at, qty=-q, cash=pnl - opening,
-                             fee=fee, px=px_close))      # the whole fee at the closing price
+                             fee=0.0 if expiry else fee,  # traded close: whole fee at closing
+                             px=px_close, settle=expiry))   # expired: cash = settlement
     return out
+
+
+@dataclass(frozen=True)
+class PremiumSpan:
+    """build 23 — one leg for the premium-per-day read-outs of graph ①."""
+    start: datetime | None          # the position's opening
+    end: datetime | None            # open: its expiry; closed: when it closed (expiry included)
+    coin: float | None              # premium − fees (None = not computed for this leg)
+    usd: float | None
+
+
+def leg_end(status: str | None, expires_at: datetime | None, closed_at: datetime | None,
+            last_seen_at: datetime | None = None) -> datetime | None:
+    """End of a leg for its duration: an open leg runs to its expiry, a closed one to its close
+    (an expiry close = the expiry); a stale leg (gone from the snapshots) to when it was last seen."""
+    if status == "open":
+        return expires_at
+    if status == "closed":
+        return closed_at or expires_at
+    return closed_at or last_seen_at or expires_at
+
+
+def premium_per_day(legs: Iterable[PremiumSpan]) -> dict:
+    """build 23 — premium − fees of one leg or a box of legs, its duration in days (earliest
+    opening → latest end) and premium − fees per day, in coin and USD. Legs without a premium are
+    counted in `n_missing` (their dates still count)."""
+    legs = list(legs)
+    have = [x for x in legs if x.coin is not None]
+    starts = [x.start for x in legs if x.start is not None]
+    ends = [x.end for x in legs if x.end is not None]
+    start, end = (min(starts) if starts else None), (max(ends) if ends else None)
+    days = (end - start).total_seconds() / 86400 if start and end and end > start else None
+    coin = sum(x.coin for x in have) if have else None
+    usd = sum(x.usd or 0.0 for x in have) if have else None
+    return {"coin": coin, "usd": usd, "start": start, "end": end, "days": days,
+            "coin_per_day": coin / days if coin is not None and days else None,
+            "usd_per_day": usd / days if usd is not None and days else None,
+            "n_missing": len(legs) - len(have)}
 
 
 def leg_cash(leg: LegInfo, ct_val: float | None, size_coin: float | None,
@@ -212,7 +291,8 @@ def leg_cash(leg: LegInfo, ct_val: float | None, size_coin: float | None,
             net = sum(e.qty for e in fev)
             traded = sum(e.cash + (e.fee if e.fee_usd is None else 0.0) for e in fev)
             events.append(CashEvent(at=leg.closed_at or leg.opened_at, qty=-net,
-                                    cash=(leg.realized_pnl or 0.0) - traded, px=px_close))
+                                    cash=(leg.realized_pnl or 0.0) - traded, px=px_close,
+                                    settle=True))
     elif leg.status == "open" and leg.snaps:
         events, source = snapshot_events(leg.snaps, leg.side, ct_val, leg.opened_at, px_at), \
             "snapshots"
@@ -221,5 +301,7 @@ def leg_cash(leg: LegInfo, ct_val: float | None, size_coin: float | None,
     open_usd, realized_usd, missing = apply(events)
     if leg.status == "closed":                           # nothing is open any more
         realized_usd, open_usd = realized_usd + open_usd, 0.0
+    p_coin, p_usd, c_coin, c_usd, f_usd = premium_net(events)
     return LegCash(open_usd=open_usd, realized_usd=realized_usd, source=source,
-                   missing_px=missing)
+                   missing_px=missing, premium_coin=p_coin, premium_usd=p_usd,
+                   close_coin=c_coin, close_usd=c_usd, fee_usd=f_usd)

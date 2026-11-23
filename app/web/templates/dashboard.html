@@ -234,9 +234,11 @@ async function renderAssetEquity(){
   if (d.ccy && !sel.value) sel.value = d.ccy;
   const ccy = d.ccy || "";
   C.ccy = d.ccy;
+  // build 25: + USD — balance at OKX's USD value of each snapshot, P&L at operation-time prices
+  C.fmtTop = p => eqUsdTxt(p.usd, false); C.fmtBot = p => eqUsdTxt(p.net_usd, true);
   const hx = d.header || {}, stat = document.getElementById("asset-stat");
   stat.innerHTML = hx.delta!=null
-    ? `<span class="${hx.delta>=0?'pos':'neg'}">${coin(hx.delta,ccy)} since ${hx.since} · ${pct(hx.pct)}</span>` : "";
+    ? `<span class="${hx.delta>=0?'pos':'neg'}">${coin(hx.delta,ccy)}${hx.delta_usd!=null?` (${usd(hx.delta_usd,2)})`:""} since ${hx.since} · ${pct(hx.pct)}</span>` : "";
   const xs = d.balance.map(p=>p.t), ys = d.balance.map(p=>p.v);
   const synced = document.getElementById("sync-1b").checked;
   let rng = periodRange(pp.frm, pp.till);
@@ -245,16 +247,16 @@ async function renderAssetEquity(){
   const nowMs = eqPrep(C, d, d.balance, rng, pp);   // build 10: data kept for the navigation
   await Plotly.newPlot("c-asset-equity", [{
     x:xs, y:ys, type:"scatter", mode:"lines", fill:"tozeroy",
-    line:{color:COL.blue,width:2}, fillcolor:"rgba(59,130,246,0.12)",
-    hovertemplate:"%{x}<br>%{y:.6f} "+ccy+"<extra></extra>"
+    line:{color:COL.blue,width:2}, fillcolor:"rgba(59,130,246,0.12)", customdata: C.top.map(q => q.cd),
+    hovertemplate:"%{x}<br>%{y:.6f} "+ccy+"%{customdata}<extra></extra>"
   }, ChartNav.nowTrace(nowMs, "y2")], layout({ yaxis:{title:"Account balance ("+ccy+")",
       range: ys.length?[Math.min(...ys)*0.995,Math.max(...ys)*1.005]:undefined},
     xaxis: {...xa, ...eqTicks(C, "c-asset-equity", 80, 16)}, showlegend:false, margin:{l:80,r:16,t:10,b:24},
     ...eqLayout(nowMs) }), EQ_CFG);
   await Plotly.newPlot("c-asset-pnl", [{
-    x:d.pnl.map(p=>p.date), y:d.pnl.map(p=>p.net), type:"bar",
+    x:d.pnl.map(p=>p.date), y:d.pnl.map(p=>p.net), type:"bar", customdata: C.bot.map(q => q.cd),
     marker:{color:d.pnl.map(p=>p.net>=0?COL.green:COL.red)},
-    hovertemplate:"%{x}<br>net %{y:.6f} "+ccy+"<extra></extra>"
+    hovertemplate:"%{x}<br>net %{y:.6f} "+ccy+"%{customdata}<extra></extra>"
   }, ChartNav.nowTrace(nowMs, "y2")], layout({ yaxis:{title:"Net P&L / day ("+ccy+")"},
     xaxis: {...xa, ...eqTicks(C, "c-asset-pnl", 80, 16)}, showlegend:false,
     margin:{l:80,r:16,t:6,b:30}, ...eqLayout(nowMs) }), EQ_CFG);
@@ -309,12 +311,41 @@ function pbNiceStep(m){
   const raw = m / 2, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
   return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
 }
+// build 23: premium − fees (coin + USD at the prices of the trades), duration, per day — of a leg,
+// or of a box (its legs' sum; earliest opening → latest end: expiry if open, the close if closed)
+const pbSgnCoin = v => (v > 0 ? "+" : v < 0 ? "−" : "") + String(+Math.abs(v).toFixed(6));
+const pbSgnUsd = v => (v > 0 ? "+" : "") + usd(v, 2).replace("-", "−");
+const pbVal = (cv, uv, c) => `${pbSgnCoin(cv)}${c} · ${uv == null ? "USD n/a" : pbSgnUsd(uv)}`;
+// build 24: P&L = premium − fees (opening trades + their fees, at the opening prices) + closing
+// (buy-backs / sales, the expiry settlement, their fees, at the closing prices; an open leg: the
+// value of what is still open at the current price). No cash data → the old P&L (day rate).
+const PB_CLOSE = {"settlement": ["settlement", "settlement price"], "closing": ["closing", "closing prices"],
+                  "value now": ["value now", "price now"], "closing + value now": ["closing + value now", "closing prices / price now"],
+                  "settlement + closing": ["settlement + closing", "settlement / closing prices"]};
+function pbPnlRows(n, coin, oldUsd){
+  if (!n) return oldUsd != null ? `<br>P&L ${usd(oldUsd, 2)} <span>(day rate)</span>` : "";
+  const c = coin ? " " + escH(coin) : "", k = PB_CLOSE[n.close_kind] || PB_CLOSE.closing;
+  return `<br><b>P&L ${pbVal(n.coin, n.usd, c)}</b>` +
+    `<br>&nbsp;· premium − fees ${pbVal(n.premium_coin, n.premium_usd, c)} <i>(opening prices)</i>` +
+    `<br>&nbsp;· ${k[0]} ${pbVal(n.close_coin, n.close_usd, c)} <i>(${k[1]})</i>`;
+}
+function pbPremRows(p, coin, isBox, inPnl){
+  if (!p) return "";
+  const c = coin ? " " + escH(coin) : "";
+  const dur = p.days != null ? `${p.days.toFixed(1)} days` : "—";
+  const span = isBox && p.start && p.end ? ` (${fmtUtc(p.start)} → ${fmtUtc(p.end)})` : "";
+  const miss = p.n_missing ? `<br>${plural(p.n_missing, "leg", "legs")} without cash data yet` : "";
+  if (p.coin == null) return `<br>premium − fees: no cash data yet<br>duration ${dur}${span}`;
+  return (inPnl ? "" : `<br>premium − fees ${pbVal(p.coin, p.usd, c)}`) +
+    `<br>duration ${dur}${span}` +
+    (p.coin_per_day != null ? `<br>premium per day ${pbVal(p.coin_per_day, p.usd_per_day, c)}` : "") + miss;
+}
 function pbBoxHover(b){
   return `<b>${escH(b.legend)}</b><br>${b.n_legs} legs (${b.n_open_legs} open) · total ${escH(b.label)}` +
     pbSplitRows(b.split, b.coin) +
     `<br>${fmtUtc(b.started_at)} → ${fmtUtc(b.ends_at)}` +
     `<br>strikes ${fmtPx(b.strike_lo)} – ${fmtPx(b.strike_hi)}` +
-    (b.net_pnl_usd != null ? `<br>P&L ${usd(b.net_pnl_usd, 2)}` : "");
+    pbPnlRows(b.pnl, b.coin, b.net_pnl_usd) + pbPremRows(b.premium, b.coin, true, !!b.pnl);
 }
 function pbLegHover(l, b){
   const end = l.status === "closed"
@@ -322,7 +353,8 @@ function pbLegHover(l, b){
     : (l.status === "open" ? "open" : "gone from snapshots");
   return `<b>${escH(l.inst_id)}</b><br>${escH(l.side || "")} ${fmtPx(l.size)} · ${fmtCoin(l.size_coin, l.coin)}` +
     `<br>opened ${fmtUtc(l.opened_at)}<br>expiry ${fmtUtc(l.expires_at)} · ${end}` +
-    (l.pnl_usd != null ? `<br>P&L ${usd(l.pnl_usd, 2)}` : "") + (b ? `<br>box: ${escH(b.name)}` : "");
+    pbPnlRows(l.pnl, l.coin, l.pnl_usd) + pbPremRows(l.premium, l.coin, false, !!l.pnl) +
+    (b ? `<br>box: ${escH(b.name)}` : "");
 }
 
 async function renderPriceBoxes(){
@@ -956,11 +988,15 @@ async function renderEquity() {
   const pp = periodParams("1");
   const d = await api("/equity", { subaccount: state.subaccount, ...pp });
   if (!d || gen !== C.gen) return;
+  // build 25: + the account's coin — equity ÷ the coin's price at each snapshot; daily net P&L in
+  // USD at operation-time prices (as graph ①) and in coin (OKX realizedPnl)
+  const cc = d.coin || "";
+  C.fmtTop = p => eqCoinTxt(p.coin, cc, false); C.fmtBot = p => eqCoinTxt(p.net_coin, cc, true);
   const hx = d.header || {};
   if (hx.delta != null) {
     const cls = hx.delta>=0?"pos":"neg";
     document.getElementById("equity-header").innerHTML =
-      `<span class="${cls}" style="font-weight:800">${usdK(hx.delta)} since ${hx.since} · ${pct(hx.pct)}</span>`;
+      `<span class="${cls}" style="font-weight:800">${usdK(hx.delta)}${hx.delta_coin!=null?` (${eqCoinTxt(hx.delta_coin, cc, true).slice(3)})`:""} since ${hx.since} · ${pct(hx.pct)}</span>`;
   }
   const xs = d.equity.map(p=>p.t), ys = d.equity.map(p=>p.v);
   const synced = document.getElementById("sync-1").checked;
@@ -971,14 +1007,15 @@ async function renderEquity() {
   const nowMs = eqPrep(C, d, d.equity, rng, pp);    // build 10: data kept for the navigation
   await Plotly.newPlot("c-equity", [{
     x: xs, y: ys, type:"scatter", mode:"lines", fill:"tozeroy",
-    line:{color:COL.blue,width:2}, fillcolor:"rgba(59,130,246,0.12)", name:"Equity"
+    line:{color:COL.blue,width:2}, fillcolor:"rgba(59,130,246,0.12)", name:"Equity",
+    customdata: C.top.map(q => q.cd), hovertemplate: "%{x}<br>%{y:$,.2f}%{customdata}<extra></extra>"
   }, ChartNav.nowTrace(nowMs, "y2")], layout({ yaxis:{title:"Account equity (USD)", range: ys.length?[Math.min(...ys)*0.98,Math.max(...ys)*1.02]:undefined},
     xaxis: {...xa, ...eqTicks(C, "c-equity", 64, 16)}, showlegend:false, margin:{l:64,r:16,t:10,b:24},
     ...eqLayout(nowMs) }), EQ_CFG);
   await Plotly.newPlot("c-pnl", [{
-    x: d.pnl.map(p=>p.date), y: d.pnl.map(p=>p.net), type:"bar",
+    x: d.pnl.map(p=>p.date), y: d.pnl.map(p=>p.net), type:"bar", customdata: C.bot.map(q => q.cd),
     marker:{color: d.pnl.map(p=>p.net>=0?COL.green:COL.red)},
-    hovertemplate:"%{x}<br>net %{y:$,.2f}<extra></extra>"
+    hovertemplate:"%{x}<br>net %{y:$,.2f}%{customdata}<extra></extra>"
   }, ChartNav.nowTrace(nowMs, "y2")], layout({ yaxis:{title:"Net P&L / day (USD)"},
     xaxis: {...xa, ...eqTicks(C, "c-pnl", 64, 16)}, showlegend:false, margin:{l:64,r:16,t:6,b:30},
     ...eqLayout(nowMs) }), EQ_CFG);
@@ -1001,11 +1038,15 @@ const EQC = {
 };
 const ymdUTC = ms => new Date(ms).toISOString().slice(0, 10);
 const eqDiv = (C, which) => document.getElementById(which === "top" ? C.topId : C.botId);
-const eqPts = (list, key) => list.map(p => ({t: Date.parse(p[key]), x: p[key], v: key === "date" ? p.net : p.v}));
+// build 25: `cd` = the same point in the other unit (② coin, ②b USD), shown in the hover
+const eqPts = (list, key, fmt) => list.map(p => ({t: Date.parse(p[key]), x: p[key], v: key === "date" ? p.net : p.v,
+                                                  cd: fmt ? fmt(p) : ""}));
+const eqCoinTxt = (v, c, sign) => v == null ? "" : ` · ${sign && v > 0 ? "+" : v < 0 ? "−" : ""}${String(+Math.abs(v).toFixed(6))} ${c || ""}`;
+const eqUsdTxt = (v, sign) => v == null ? "" : ` · ${sign && v > 0 ? "+" : ""}${usd(v, 2).replace("-", "−")}`;
 // keep this render's data: points (top), daily bars (bottom), what is loaded (cover), data bounds
 function eqPrep(C, d, series, rng, pp){
   const av = d.available || [null, null];
-  Object.assign(C, {busy: false, view: null, top: eqPts(series, "t"), bot: eqPts(d.pnl, "date"),
+  Object.assign(C, {busy: false, view: null, top: eqPts(series, "t", C.fmtTop), bot: eqPts(d.pnl, "date", C.fmtBot),
     rng: rng ? [Date.parse(rng[0]), Date.parse(rng[1])] : null,
     cover: [pp.frm ? Date.parse(pp.frm) : -Infinity, pp.till ? Date.parse(pp.till) + EQ_DAY : Infinity],
     lo: av[0] ? Date.parse(av[0]) : Infinity, hi: av[1] ? Math.min(Date.parse(av[1]), Date.now()) : -Infinity});
@@ -1099,12 +1140,13 @@ async function eqLoad(C, p){
     for (const q of fresh) m.set(q.t, q);
     return [...m.values()].sort((a, b) => a.t - b.t);
   };
-  C.top = merge(C.top, eqPts(r[C.series] || [], "t"));
-  C.bot = merge(C.bot, eqPts(r.pnl || [], "date"));
+  C.top = merge(C.top, eqPts(r[C.series] || [], "t", C.fmtTop));
+  C.bot = merge(C.bot, eqPts(r.pnl || [], "date", C.fmtBot));
   C.cover = touches ? [Math.min(c0, p.from), Math.max(c1, p.to)] : [p.from, p.to];
-  await Plotly.restyle(eqDiv(C, "top"), {x: [C.top.map(q => q.x)], y: [C.top.map(q => q.v)]}, [0]);
+  await Plotly.restyle(eqDiv(C, "top"), {x: [C.top.map(q => q.x)], y: [C.top.map(q => q.v)],
+    customdata: [C.top.map(q => q.cd)]}, [0]);
   await Plotly.restyle(eqDiv(C, "bot"), {x: [C.bot.map(q => q.x)], y: [C.bot.map(q => q.v)],
-    "marker.color": [C.bot.map(q => q.v >= 0 ? COL.green : COL.red)]}, [0]);
+    customdata: [C.bot.map(q => q.cd)], "marker.color": [C.bot.map(q => q.v >= 0 ? COL.green : COL.red)]}, [0]);
   if (gen === C.gen && C.view) eqOnView(C, C.view[0], C.view[1]);   // the view may have moved on
 }
 

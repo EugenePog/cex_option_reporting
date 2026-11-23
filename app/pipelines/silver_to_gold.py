@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select, text
 
@@ -95,9 +95,17 @@ def _period_start(period: str, today: date) -> date:
     return date(1970, 1, 1)  # 'all'
 
 
-def _close_type(raw_type: str | None) -> str:
-    # OKX positions-history 'type': 3 = delivery/exercise (expiry); others = traded close.
-    return "expiry" if str(raw_type) == "3" else "close"
+EXPIRY_WINDOW = timedelta(minutes=5)
+
+
+def _close_type(closed_at: datetime | None, expiry: date | None) -> str:
+    """build 24 — 'expiry' when the position closed within ±5 minutes of its expiry (08:00 UTC on
+    the expiry date), else 'close' (a trade). OKX positions-history `type` has no expiry code
+    (1 partial close, 2 close all, 3 liquidation, 4 partial liquidation, 5 / 6 ADL): expiries come
+    as 2, so the type is not used (before build 24, 3 was read as expiry)."""
+    exp = expires_at(expiry)
+    return "expiry" if (closed_at is not None and exp is not None
+                        and abs(closed_at - exp) <= EXPIRY_WINDOW) else "close"
 
 
 def run() -> dict[str, int]:
@@ -121,19 +129,27 @@ def run() -> dict[str, int]:
         rates = _CoinUsd(s)  # coin→USD conversion for USD-denominated gold columns
         counts["balance_timeseries"] = _build_balance_ts(s)
         counts["asset_balance_timeseries"] = _build_asset_balance_ts(s)
-        counts["asset_pnl_daily"] = _build_asset_pnl_daily(s, rates)
         eod = _eod_equity(s)  # end-of-day USD equity per (subaccount, day) — used by rollups
         counts["position_current"] = _build_position_current(s)
         counts["underlying_price"] = _build_underlying_price(s)
         counts["expiry_settlement"] = _build_expiry_settlement(s)
         counts["greeks_by_expiry"] = _build_greeks_by_expiry(s)
         counts["strategy_summary"] = _build_strategy_summary(s, today)
-        counts["deal_ledger"] = _build_deal_ledger(s, rates)
         sizes = load_contract_sizes(s)   # contract size per exchange (core.contract_size)
-        counts["position_leg"], legs = _build_position_leg(s, rates, sizes)
+        # build 25: each leg's cash at operation-time prices, computed once — graph ① (position_leg)
+        # and, for closed positions, the USD of ② (pnl_daily), ②b (asset_pnl_daily) and Analyze
+        # (deal_ledger): premium + opening fees at the opening prices, closing / settlement at the
+        # closing prices, as graph ①'s hover
+        leg_rows = s.execute(select(PositionLeg)).scalars().all()
+        cash = _leg_cash_all(s, leg_rows, rates, sizes)
+        closed_cash = {lg.id: cash[lg.id] for lg in leg_rows
+                       if lg.status == "closed" and lg.id in cash}
+        counts["asset_pnl_daily"] = _build_asset_pnl_daily(s, rates, closed_cash)
+        counts["deal_ledger"] = _build_deal_ledger(s, rates, closed_cash)
+        counts["position_leg"], legs = _build_position_leg(s, rates, sizes, leg_rows, cash)
         counts["box_shape"] = _build_box_shape(s, legs, now)
         counts["index_candle"] = _build_index_candles(s)
-        counts["pnl_daily"] = _build_pnl_daily(s, rates)
+        counts["pnl_daily"] = _build_pnl_daily(s, rates, closed_cash)
         counts["client_pnl_daily"] = _build_client_pnl_daily(s, sub_user, eod)
         counts.update(_build_performance(s, sub_user, today, now, eod))
 
@@ -229,38 +245,65 @@ class _CoinUsd:
         return 1.0 if ccy.upper().startswith("USD") else 1.0
 
 
-def _build_asset_pnl_daily(s, rates: _CoinUsd) -> int:
+def _deal_usd(cp, closed_cash: dict[int, LegCash], rates: _CoinUsd) -> tuple[float, float, str]:
+    """build 25 — USD of one closed position: (net, fees, basis). 'trades' = as graph ①'s hover:
+    the leg's premium + opening fees at the opening prices + closing trades / settlement and their
+    fees at the closing prices (app.domain.leg_cash; its coin total = OKX realizedPnl). 'day rate'
+    = the old rule, coin × the coin's USD rate on the closing day — used when the leg has no cash
+    data or an operation had no price."""
+    c = closed_cash.get(cp.position_leg_id) if cp.position_leg_id is not None else None
+    if c is not None and not c.missing_px and c.premium_usd is not None and c.close_usd is not None:
+        return c.premium_usd + c.close_usd, c.fee_usd or 0.0, "trades"
+    r = rates.rate(cp.subaccount_id, cp.ccy, cp.closed_at.date()) if cp.closed_at else 1.0
+    return _fl(cp.realized_pnl) * r, _fl(cp.fee) * r, "day rate"
+
+
+def _upl_usd(p, rates: _CoinUsd) -> float:
+    """build 25 — an open position's unrealized PnL in USD at the index price of its own snapshot
+    (the moment), as graph ①'s "value now"; the day rate only when the snapshot has no price."""
+    if p.idx_px is not None:
+        return _fl(p.upl) * _fl(p.idx_px)
+    return _fl(p.upl) * rates.rate(p.subaccount_id, _asset_of(p.underlying), p.captured_at.date())
+
+
+def _build_asset_pnl_daily(s, rates: _CoinUsd, closed_cash: dict[int, LegCash]) -> int:
     # coin-denominated. OKX realizedPnl already NETS fees (= pnl + fee + funding), so it IS net_pnl;
     # gross realized is derived as net - fees (fee is negative), and fees are shown separately.
-    agg: dict[tuple, dict] = defaultdict(lambda: dict(net=0.0, fee=0.0))
+    # build 25: USD as graph ① (operation-time prices, `_deal_usd`; unrealized at the snapshot's
+    # index price) instead of × the day rate
+    agg: dict[tuple, dict] = defaultdict(lambda: dict(net=0.0, fee=0.0, net_usd=0.0, fee_usd=0.0))
     for cp in s.execute(select(ClosedPosition)).scalars():
         if not cp.closed_at or not cp.ccy:
             continue
         k = (cp.subaccount_id, cp.ccy, cp.closed_at.date())
+        net_usd, fee_usd, _basis = _deal_usd(cp, closed_cash, rates)
         agg[k]["net"] += _fl(cp.realized_pnl)   # OKX net (fees included)
         agg[k]["fee"] += _fl(cp.fee)
+        agg[k]["net_usd"] += net_usd
+        agg[k]["fee_usd"] += fee_usd
 
-    # end-of-day unrealized (coin) per (subaccount, asset, day) from position snapshots
-    eod: dict[tuple, dict[datetime, float]] = defaultdict(dict)
+    # end-of-day unrealized (coin, USD) per (subaccount, asset, day) from position snapshots
+    eod: dict[tuple, dict[datetime, tuple[float, float]]] = defaultdict(dict)
     for p in s.execute(select(PositionSnapshot)).scalars():
         ccy = _asset_of(p.underlying)
         if p.captured_at is None or ccy is None:
             continue
         k = (p.subaccount_id, ccy, p.captured_at.date())
-        eod[k][p.captured_at] = eod[k].get(p.captured_at, 0.0) + _fl(p.upl)
+        cur = eod[k].get(p.captured_at, (0.0, 0.0))
+        eod[k][p.captured_at] = (cur[0] + _fl(p.upl), cur[1] + _upl_usd(p, rates))
     eod_level = {k: v[max(v)] for k, v in eod.items()}
 
     keys = set(agg) | set(eod_level)
     for (sub_id, ccy, d) in keys:
         a = agg.get((sub_id, ccy, d), {})
         net, fees = a.get("net", 0.0), a.get("fee", 0.0)
-        upl = eod_level.get((sub_id, ccy, d))
-        r = rates.rate(sub_id, ccy, d)
+        net_usd, fees_usd = a.get("net_usd", 0.0), a.get("fee_usd", 0.0)
+        upl, upl_usd = eod_level.get((sub_id, ccy, d), (None, None))
         s.add(AssetPnlDaily(
             subaccount_id=sub_id, ccy=ccy, date=d, realized_pnl=net - fees,
             unrealized_pnl=upl, fees=fees, net_pnl=net,
-            realized_pnl_usd=(net - fees) * r, unrealized_pnl_usd=(upl * r if upl is not None else None),
-            fees_usd=fees * r, net_pnl_usd=net * r))
+            realized_pnl_usd=net_usd - fees_usd, unrealized_pnl_usd=upl_usd,
+            fees_usd=fees_usd, net_pnl_usd=net_usd))
     return len(keys)
 
 
@@ -365,26 +408,27 @@ def _build_strategy_summary(s, today: date) -> int:
     return len(keys)
 
 
-def _build_deal_ledger(s, rates: _CoinUsd) -> int:
+def _build_deal_ledger(s, rates: _CoinUsd, closed_cash: dict[int, LegCash]) -> int:
     n = 0
     for cp in s.execute(select(ClosedPosition)).scalars():
         hold = None
         if cp.opened_at and cp.closed_at:
             hold = (cp.closed_at - cp.opened_at).days
-        r = rates.rate(cp.subaccount_id, cp.ccy, cp.closed_at.date()) if cp.closed_at else 1.0
+        net_usd, fee_usd, basis = _deal_usd(cp, closed_cash, rates)   # build 25
         s.add(DealLedger(
             subaccount_id=cp.subaccount_id, strategy_id=cp.strategy_id, inst_id=cp.inst_id,
             underlying=cp.underlying, opt_type=cp.opt_type, strike=cp.strike, expiry=cp.expiry,
-            side=cp.side, close_type=_close_type(cp.close_type), opened_at=cp.opened_at,
+            side=cp.side, close_type=_close_type(cp.closed_at, cp.expiry), opened_at=cp.opened_at,
             closed_at=cp.closed_at, entry_px=cp.open_avg_px, exit_px=cp.close_avg_px,
             size=cp.size, fee=cp.fee, realized_pnl=cp.realized_pnl,
-            realized_pnl_usd=_fl(cp.realized_pnl) * r, hold_days=hold,
+            realized_pnl_usd=net_usd, fees_usd=fee_usd, usd_basis=basis, hold_days=hold,
         ))
         n += 1
     return n
 
 
-def _build_position_leg(s, rates: _CoinUsd, sizes: ContractSizes) -> tuple[int, list[Leg]]:
+def _build_position_leg(s, rates: _CoinUsd, sizes: ContractSizes, rows,
+                        cash: dict[int, LegCash]) -> tuple[int, list[Leg]]:
     """One row per silver.position_leg (Box builder read model) with USD P&L on the same basis as
     deal_ledger (realized × close-day rate) and pnl_daily (unrealized × last-snapshot-day rate).
 
@@ -394,8 +438,7 @@ def _build_position_leg(s, rates: _CoinUsd, sizes: ContractSizes) -> tuple[int, 
     box_shape)."""
     n = 0
     legs: list[Leg] = []
-    rows = s.execute(select(PositionLeg)).scalars().all()
-    cash = _leg_cash_all(s, rows, rates, sizes)          # build 21: graph ① premium / realized
+    # rows = silver.position_leg, cash = their A / B / split (build 21; computed once in run())
     for lg in rows:
         itype = inst_type_of(lg.inst_id)
         ct_val = sizes.ct_val(lg.cex_code, lg.underlying, itype)
@@ -417,7 +460,7 @@ def _build_position_leg(s, rates: _CoinUsd, sizes: ContractSizes) -> tuple[int, 
             underlying=lg.underlying, opt_type=lg.opt_type, strike=lg.strike, expiry=lg.expiry,
             side=lg.side, status=lg.status, size=lg.size, entry_px=lg.entry_px,
             exit_px=lg.exit_px, closed_at=lg.closed_at,
-            close_type=_close_type(lg.close_type) if lg.close_type is not None else None,
+            close_type=_close_type(lg.closed_at, lg.expiry) if lg.close_type is not None else None,
             last_seen_at=lg.last_seen_at, realized_pnl=lg.realized_pnl,
             realized_pnl_usd=realized_usd, upl=lg.upl, upl_usd=upl_usd,
             fee=lg.fee, ccy=lg.ccy, n_fills=lg.n_fills, n_snapshots=lg.n_snapshots,
@@ -426,6 +469,10 @@ def _build_position_leg(s, rates: _CoinUsd, sizes: ContractSizes) -> tuple[int, 
             realized_cash_usd=cash[lg.id].realized_usd if lg.id in cash else None,
             cash_source=cash[lg.id].source if lg.id in cash else None,
             cash_missing_px=cash[lg.id].missing_px if lg.id in cash else None,
+            premium_net_coin=cash[lg.id].premium_coin if lg.id in cash else None,   # build 23
+            premium_net_usd=cash[lg.id].premium_usd if lg.id in cash else None,
+            close_net_coin=cash[lg.id].close_coin if lg.id in cash else None,       # build 24
+            close_net_usd=cash[lg.id].close_usd if lg.id in cash else None,
         ))
         legs.append(Leg(
             leg_id=lg.id, subaccount_id=lg.subaccount_id, strategy_id=lg.strategy_id,
@@ -463,7 +510,7 @@ def _leg_cash_all(s, rows, rates: _CoinUsd, sizes: ContractSizes) -> dict[int, L
     def info(lg, snaps=()) -> LegInfo:
         return LegInfo(status=lg.status, side=lg.side, opened_at=lg.pos_opened_at,
                        closed_at=lg.closed_at,
-                       close_type=_close_type(lg.close_type) if lg.close_type is not None else None,
+                       close_type=_close_type(lg.closed_at, lg.expiry) if lg.close_type is not None else None,
                        size=_opt(lg.size), entry_px=_opt(lg.entry_px), fee=_opt(lg.fee),
                        realized_pnl=_opt(lg.realized_pnl), fills=fills.get(lg.id, ()), snaps=snaps)
 
@@ -598,7 +645,7 @@ def _build_index_candles(s) -> int:
     return total
 
 
-def _build_pnl_daily(s, rates: _CoinUsd) -> int:
+def _build_pnl_daily(s, rates: _CoinUsd, closed_cash: dict[int, LegCash]) -> int:
     # OKX realizedPnl already NETS fees (= pnl + fee + funding), so it IS net_pnl; gross realized
     # is derived as net - fees (fee is negative), fees shown separately. USD amounts convert each
     # closed position's coin PnL by that coin's rate at close (a strategy may mix settlement coins).
@@ -609,11 +656,11 @@ def _build_pnl_daily(s, rates: _CoinUsd) -> int:
             continue
         d = cp.closed_at.date()
         k = (cp.subaccount_id, cp.strategy_id, d)
-        r = rates.rate(cp.subaccount_id, cp.ccy, d)
+        net_usd, fee_usd, _basis = _deal_usd(cp, closed_cash, rates)   # build 25: as graph ①
         agg[k]["net"] += _fl(cp.realized_pnl)   # OKX net (fees included)
         agg[k]["fee"] += _fl(cp.fee)
-        agg[k]["net_usd"] += _fl(cp.realized_pnl) * r
-        agg[k]["fee_usd"] += _fl(cp.fee) * r
+        agg[k]["net_usd"] += net_usd
+        agg[k]["fee_usd"] += fee_usd
 
     # end-of-day unrealized level per (subaccount, strategy, day) from position snapshots (coin+USD)
     eod: dict[tuple, dict[datetime, tuple[float, float]]] = defaultdict(dict)
@@ -622,9 +669,8 @@ def _build_pnl_daily(s, rates: _CoinUsd) -> int:
             continue
         d = p.captured_at.date()
         k = (p.subaccount_id, p.strategy_id, d)
-        r = rates.rate(p.subaccount_id, _asset_of(p.underlying), d)
         cur = eod[k].get(p.captured_at, (0.0, 0.0))
-        eod[k][p.captured_at] = (cur[0] + _fl(p.upl), cur[1] + _fl(p.upl) * r)
+        eod[k][p.captured_at] = (cur[0] + _fl(p.upl), cur[1] + _upl_usd(p, rates))   # build 25
     eod_level = {k: v[max(v)] for k, v in eod.items()}  # upl at the latest snapshot of the day
 
     keys = set(agg) | set(eod_level)
